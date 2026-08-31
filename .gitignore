@@ -1,0 +1,16 @@
+# 依赖与构建产物（本项目零依赖，仅防御性配置）
+node_modules/
+dist/
+build/
+
+# 日志与临时文件
+*.log
+.DS_Store
+Thumbs.db
+
+# 编辑器
+.vscode/
+.idea/
+
+# 本地测试备份
+*.bak

@@ -1,0 +1,12 @@
+{
+  "name": "幻语 · 角色扮演对话",
+  "short_name": "幻语",
+  "description": "手机优先的角色扮演 AI 对话应用，支持自定义 API、思考强度与技能库",
+  "start_url": "./",
+  "display": "standalone",
+  "background_color": "#f4f5f9",
+  "theme_color": "#4f6bff",
+  "icons": [
+    { "src": "icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }
+  ]
+}
