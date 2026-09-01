@@ -824,6 +824,18 @@ svg.ic { width: 22px; height: 22px; display: block; fill: none; stroke: currentC
 }
 .divider-label:first-child { padding-top: 2px; }
 
+/* 并排按钮行(世界页: 创造+导入) */
+.btn-row-2 { display: flex; gap: 10px; align-items: stretch; }
+.plain-add {
+  flex: none; width: auto; padding: 0 16px;
+  background: var(--panel-2); color: var(--text-2);
+  border: 1.5px solid var(--line); box-shadow: none;
+  font-weight: 500;
+}
+
+/* 版本角标 */
+.ver-tag { text-align: center; font-size: 11px; color: var(--text-3); padding-top: 14px; }
+
 /* ================================================================
    电脑端适配
    ================================================================ */

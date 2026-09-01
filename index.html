@@ -47,7 +47,11 @@
         <div class="empty-tip" data-empty="conv" hidden>还没有对话，点击上方开启～</div>
       </div>
       <div class="dtab-page" data-page="world" hidden>
-        <button class="add-btn" id="addWorldBtn"><span class="ic-plus"></span>创造新世界</button>
+        <div class="btn-row-2">
+          <button class="add-btn" id="addWorldBtn" style="flex:1;margin-bottom:0"><span class="ic-plus"></span>创造新世界</button>
+          <button class="add-btn plain-add" id="importWorldBtn">导入世界</button>
+        </div>
+        <div style="height:12px"></div>
         <div id="worldGrid" class="char-grid"></div>
         <div class="empty-tip" data-empty="world" hidden>还没有世界，创造一个吧～</div>
       </div>
@@ -79,6 +83,7 @@
           <div class="ht-sub" id="htSub">开启一段新的冒险</div>
         </div>
       </div>
+      <button class="icon-btn" id="rosterBtn" title="角色名册" hidden></button>
       <button class="icon-btn" id="headerNewBtn" title="新对话"></button>
     </header>
 

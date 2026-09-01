@@ -39,7 +39,10 @@ function serveStatic(req, res, pathname) {
   if (!full.startsWith(ROOT)) { res.writeHead(403); return res.end('Forbidden'); }
   fs.readFile(full, (err, data) => {
     if (err) { res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' }); return res.end('404 Not Found'); }
-    res.writeHead(200, { 'Content-Type': MIME[path.extname(full).toLowerCase()] || 'application/octet-stream' });
+    res.writeHead(200, {
+      'Content-Type': MIME[path.extname(full).toLowerCase()] || 'application/octet-stream',
+      'Cache-Control': 'no-cache'
+    });
     res.end(data);
   });
 }

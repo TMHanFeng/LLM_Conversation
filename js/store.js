@@ -3,12 +3,37 @@
   'use strict';
 
   var KEY = 'huanyu.v1';
+  var APP_VERSION = 'v1.1';
 
   function uid() {
     return Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
   }
 
   var COLORS = ['#4f6bff', '#7b5bff', '#e5588d', '#f0743a', '#e5b42c', '#30a46c', '#12a5b8', '#6e56cf'];
+
+  /* ---------------- 内置技能（按名称增量合并到老存档） ---------------- */
+  var BUILTIN_SKILLS = [
+    { name: '细节描写增强', content: '【写作要求】回应时加强沉浸感：加入环境、气味、光线、触感等多感官细节；描写角色的动作、微表情与语气；重要情绪变化要有铺垫。每次回应保持在300字以内，结尾留下让对话继续的空间。' },
+    { name: '古风文言', content: '【语言要求】请以半文半白的古风语言回应，用词典雅、句式错落，可偶尔引用诗词典故，但不堆砌辞藻，保证意思清晰。' },
+    { name: '深度推演', content: '【思考要求】回答前请在内心先梳理：1) 对方此刻的真实意图与情绪；2) 作为角色最符合人设的反应；3) 推进故事的最佳钩子。然后再输出回应。' },
+    { name: '英语陪练', content: '【对话要求】请全程使用英语与我交流。若我的表达有语法或用词错误，请在回应末尾用「✏️ Tip:」温和指出并给出更地道的说法。' },
+    { name: '战斗描写', content: '【战斗要求】战斗场面要有回合感：先读招、再交锋；动作干净利落，体现双方实力差距与代价；受伤要有持续后果，不写主角光环式的反杀。' },
+    { name: '悬疑氛围', content: '【氛围要求】保持悬疑感：信息分批揭露，埋设伏笔与反常细节，NPC 各有隐瞒；每次回应结尾留下一个待解的疑点。' },
+    { name: '轻松幽默', content: '【风格要求】整体基调轻松幽默：善用误会、吐槽与反差，NPC 之间可以互相拆台，但笑点要自然，不强行搞笑，关键剧情仍需认真演绎。' },
+    { name: '多NPC互动', content: '【互动要求】每次回应让至少两名在场 NPC 产生互动（对话/配合/争执/默契），体现他们的立场差异与相互记忆；NPC 互动仍由玩家的言行触发。' },
+    { name: '剧情加速', content: '【节奏要求】加快叙事节奏：减少日常寒暄与重复描写，直接推进关键事件与冲突；每次回应至少推动一个实质性变化（新线索/新人物/场景转换）。' },
+    { name: '剧情放缓', content: '【节奏要求】放慢叙事节奏：多用生活化细节与情感交流铺垫，让玩家充分体验日常与角色相处；冲突缓慢酝酿，不急于抛出大事件。' },
+    { name: '简洁模式', content: '【长度要求】每次回应控制在80字以内：短句为主，只保留最关键的动作与对白，像电报一样精炼。' },
+    { name: '长篇沉浸', content: '【长度要求】进行长篇沉浸式描写（400字左右）：环境、感官、心理与对白并重；可以放慢镜头，但禁止灌水、重复或堆砌形容词。' },
+    { name: '硬核规则', content: '【逻辑要求】世界规则严格自洽：能力有代价、资源有数量、信息有来源；NPC 行为符合自身利益与性格；拒绝巧合救场与无端好运。' },
+    { name: '哥特恐怖', content: '【氛围要求】哥特恐怖基调：阴影、低语、不祥的预感；恐怖来自暗示而非血腥直写；安全感随时可能被打破，让玩家保持警觉。' }
+  ];
+
+  function seedSkills() {
+    return BUILTIN_SKILLS.map(function (b) {
+      return Object.assign({ id: uid() }, b);
+    });
+  }
 
   /* ---------------- 出厂角色 ---------------- */
   function seedCharacters() {
@@ -46,28 +71,6 @@
     ];
   }
 
-  /* ---------------- 出厂技能 ---------------- */
-  function seedSkills() {
-    return [
-      {
-        id: uid(), name: '细节描写增强',
-        content: '【写作要求】回应时加强沉浸感：加入环境、气味、光线、触感等多感官细节；描写角色的动作、微表情与语气；重要情绪变化要有铺垫。每次回应保持在300字以内，结尾留下让对话继续的空间。'
-      },
-      {
-        id: uid(), name: '古风文言',
-        content: '【语言要求】请以半文半白的古风语言回应，用词典雅、句式错落，可偶尔引用诗词典故，但不堆砌辞藻，保证意思清晰。'
-      },
-      {
-        id: uid(), name: '深度推演',
-        content: '【思考要求】回答前请在内心先梳理：1) 对方此刻的真实意图与情绪；2) 作为角色最符合人设的反应；3) 推进故事的最佳钩子。然后再输出回应。'
-      },
-      {
-        id: uid(), name: '英语陪练',
-        content: '【对话要求】请全程使用英语与我交流。若我的表达有语法或用词错误，请在回应末尾用「✏️ Tip:」温和指出并给出更地道的说法。'
-      }
-    ];
-  }
-
   /* ---------------- 世界（异世界冒险） ---------------- */
 
   /** 世界叙事协议：NPC对白独立成行 + 末尾结构化状态块 */
@@ -84,21 +87,20 @@
   /** 私谈(与世界角色1v1)记忆协议 */
   var SOLO_MEMORY_PROTOCOL = [
     '【私谈记忆】这是世界「{WORLD}」中的一段私人对话。若本次交流出现了值得长期记住的新事实（秘密、约定、感情变化、承诺、重要事件），在回复最末尾输出：',
-    '⟦STATE⟧{"memories":[{"kind":"人物|事件|关系|物品","text":"一句话事实，注明涉及的人"}]}⟦/STATE⟧',
-    '没有值得记住的新事实则不输出状态块；正文中绝不要提及状态块或协议的存在。'
+    '⟦STATE⟧{"location":"变化后的地点","memories":[{"kind":"人物|事件|关系|物品","text":"一句话事实，注明涉及的人"}]}⟦/STATE⟧',
+    'location 仅在你们更换了场所时输出（如从酒馆回到家中）；没有值得记住的新事实、场景也没变，则不输出状态块；正文中绝不要提及状态块或协议的存在。'
   ].join('\n');
 
-  /** 向世界知识图谱写入记忆（去重、封顶） */
-  function addKnowledge(world, entries, srcName) {
-    if (!world || !Array.isArray(entries)) return 0;
-    world.knowledge = world.knowledge || [];
+  /** 向知识图谱(list数组)写入记忆（去重、封顶） */
+  function addKnowledge(list, entries, srcName) {
+    if (!Array.isArray(list) || !Array.isArray(entries)) return 0;
     var added = 0;
     entries.forEach(function (e) {
       if (!e || !e.text || !String(e.text).trim()) return;
       var text = String(e.text).trim().slice(0, 120);
-      var dup = world.knowledge.some(function (k) { return k.text === text; });
+      var dup = list.some(function (k) { return k.text === text; });
       if (dup) return;
-      world.knowledge.push({
+      list.push({
         id: uid(),
         kind: ['人物', '事件', '地点', '关系', '物品'].indexOf(e.kind) >= 0 ? e.kind : '事件',
         text: text,
@@ -107,10 +109,35 @@
       });
       added++;
     });
-    if (world.knowledge.length > 200) {
-      world.knowledge = world.knowledge.slice(-200);
+    if (list.length > 200) {
+      list.splice(0, list.length - 200);
     }
     return added;
+  }
+
+  /** 对话生效的知识图谱: 分支对话用分支快照, 主线用世界共享图谱 */
+  function effectiveKnowledge(conv) {
+    if (conv && conv.knowledge) return conv.knowledge;
+    var w = getWorld(conv && conv.worldId);
+    return w ? (w.knowledge || []) : [];
+  }
+
+  /** 从当前对话处分支出一条新的世界线（消息/状态/知识图谱各自独立, 共享世界规则与名册） */
+  function branchWorldConv(convId) {
+    var src = getConv(convId);
+    if (!src || src.type !== 'world') return null;
+    var copy = JSON.parse(JSON.stringify(src));
+    copy.id = uid();
+    copy.branch = { of: src.id, ofTitle: src.title, ts: Date.now() };
+    copy.knowledge = JSON.parse(JSON.stringify(effectiveKnowledge(src)));
+    copy.title = src.title.replace(/\s*·\s*分支\d*$/, '') + ' · 分支';
+    copy.createdAt = Date.now();
+    copy.updatedAt = Date.now();
+    delete copy.pending;
+    state.conversations.unshift(copy);
+    state.activeConvId = copy.id;
+    persist();
+    return copy;
   }
 
   /** 挑选与某角色相关的记忆（其本人参与的 + 世界事件），按时间就近取 */
@@ -215,8 +242,13 @@
         state.skills = state.skills || [];
         state.conversations = state.conversations || [];
         if (!state.worlds || !state.worlds.length) state.worlds = seedWorlds();
-        // 旧数据升级: 补对话类型标记；清理上次会话中断留下的"生成中"消息
+        // 旧数据升级: 补对话类型标记；合并新增的内置技能（按名称去重）
         state.worlds.forEach(function (w) { w.knowledge = w.knowledge || []; });
+        var have = {};
+        state.skills.forEach(function (s) { have[s.name] = true; });
+        BUILTIN_SKILLS.forEach(function (b) {
+          if (!have[b.name]) state.skills.push(Object.assign({ id: uid() }, b));
+        });
         state.conversations.forEach(function (c) {
           if (!c.type) c.type = 'solo';
           (c.messages || []).forEach(function (m) {
@@ -306,20 +338,27 @@
     return conv;
   }
 
-  /** 与世界角色开私谈（1v1），共享该世界的知识图谱 */
+  /** 与世界角色开私谈（1v1），共享该世界的知识图谱；按角色人设生成场景 */
   function createWorldCharConv(worldId, charId) {
     var w = getWorld(worldId);
     var ch = w && w.characters.find(function (c) { return c.id === charId; });
     if (!w || !ch) return null;
+    var place = ch.place || '';
     var conv = {
       id: uid(), type: 'solo', worldId: w.id, characterId: ch.id,
       title: ch.name + ' · 私谈',
+      scene: { location: place, time: '' },
       systemOverride: '', skills: [],
       createdAt: Date.now(), updatedAt: Date.now(),
       messages: []
     };
     if (ch.greeting) {
       conv.messages.push({ id: uid(), role: 'assistant', content: ch.greeting, reasoning: '', ts: Date.now() });
+    } else {
+      var opening = place
+        ? '（' + place + '。你见到了' + ch.name + (ch.tagline ? '——' + ch.tagline : '') + '。）'
+        : '（你见到了' + ch.name + (ch.tagline ? '——' + ch.tagline : '') + '。）';
+      conv.messages.push({ id: uid(), role: 'assistant', content: opening, reasoning: '', ts: Date.now() });
     }
     state.conversations.unshift(conv);
     state.activeConvId = conv.id;
@@ -365,8 +404,8 @@
         return '- ' + c.name + '（' + (c.emoji || '') + '）' + (c.tagline ? c.tagline : '') + (c.system ? '：' + c.system.slice(0, 90) : '');
       }).join('\n'));
     }
-    if (w.knowledge && w.knowledge.length) {
-      parts.push('【世界记忆 · 知识图谱（已确认的事实，NPC们都记得）】\n' + w.knowledge.slice(-50).map(function (k) {
+    if (effectiveKnowledge(conv).length) {
+      parts.push('【世界记忆 · 知识图谱（已确认的事实，NPC们都记得）】\n' + effectiveKnowledge(conv).slice(-50).map(function (k) {
         return '- [' + k.kind + '] ' + k.text;
       }).join('\n'));
     }
@@ -388,7 +427,7 @@
     return parts.join('\n\n');
   }
 
-  /** 私谈: 与世界角色1v1，注入该角色的世界记忆 */
+  /** 私谈: 与世界角色1v1，注入该角色的世界记忆与当前场景 */
   function buildWorldCharSystemPrompt(conv) {
     var w = getWorld(conv.worldId);
     var ch = w && w.characters.find(function (c) { return c.id === conv.characterId; });
@@ -396,6 +435,12 @@
     var parts = [];
     parts.push(ch.system);
     parts.push('【背景】你是世界「' + w.name + '」中的角色' + (ch.tagline ? '（' + ch.tagline + '）' : '') + '，此刻正与玩家单独相处。你依然是那个世界里的你，记得世界中发生过的事。');
+    var sceneBits = [];
+    if (conv.scene && conv.scene.location) sceneBits.push('地点:' + conv.scene.location);
+    if (conv.scene && conv.scene.time) sceneBits.push('时间:' + conv.scene.time);
+    parts.push(sceneBits.length
+      ? '【当前场景】' + sceneBits.join(' · ') + '。回应中用（括号）自然体现你所处的场景与动作。'
+      : '【当前场景】请依据你的人设自然默认一个相符的场所（如老板娘在酒馆、学者在书房），并用（括号）体现出来。');
     var mem = knowledgeForChar(w, ch.name, 15);
     if (mem.length) {
       parts.push('【你记得的世界往事】\n' + mem.map(function (k) { return '- ' + k.text; }).join('\n'));
@@ -439,14 +484,14 @@
   }
 
   window.Store = {
-    KEY: KEY, COLORS: COLORS,
+    KEY: KEY, COLORS: COLORS, APP_VERSION: APP_VERSION,
     load: load, persist: persist, uid: uid,
     get state() { return state; },
     getChar: getChar, getConv: getConv, activeConv: activeConv,
     getWorld: getWorld, isWorldCharConv: isWorldCharConv,
-    addKnowledge: addKnowledge, knowledgeForChar: knowledgeForChar,
+    addKnowledge: addKnowledge, knowledgeForChar: knowledgeForChar, effectiveKnowledge: effectiveKnowledge,
     createConv: createConv, createWorldConv: createWorldConv, createWorldCharConv: createWorldCharConv,
-    deleteConv: deleteConv,
+    branchWorldConv: branchWorldConv, deleteConv: deleteConv,
     buildSystemPrompt: buildSystemPrompt, buildWorldSystemPrompt: buildWorldSystemPrompt,
     buildWorldCharSystemPrompt: buildWorldCharSystemPrompt, buildContext: buildContext
   };

@@ -155,6 +155,23 @@
   $('#newChatBtn').addEventListener('click', function () { openStartPicker(); });
   $('#headerNewBtn').addEventListener('click', function () { openStartPicker(); });
   $('#addWorldBtn').addEventListener('click', function () { openWorldForm(null); });
+  $('#rosterBtn').innerHTML = UI.icon('person');
+  $('#rosterBtn').addEventListener('click', function () {
+    var conv = Store.activeConv();
+    var w = conv && conv.type === 'world' ? convWorld(conv) : null;
+    if (w) openRoster(w);
+  });
+  $('#importWorldBtn').addEventListener('click', function () {
+    var input = document.createElement('input');
+    input.type = 'file';
+    input.accept = 'application/json';
+    input.addEventListener('change', function (e) {
+      var f = e.target.files[0];
+      input.remove();
+      importWorldFile(f);
+    });
+    input.click();
+  });
   $('#addCharBtn').addEventListener('click', function () { openCharForm(null); });
   $('#addSkillBtn').addEventListener('click', function () { openSkillForm(null); });
   $('#settingsBtn').addEventListener('click', function () { openSettings(); });
@@ -196,7 +213,7 @@
       var item = UI.el('div', { class: 'conv-item' + (conv.id === state.activeConvId ? ' active' : '') });
       var av = avatarNode(persona, 'conv-avatar');
       var meta = UI.el('div', { class: 'conv-meta' });
-      meta.appendChild(UI.el('div', { class: 'conv-title', text: title }));
+      meta.appendChild(UI.el('div', { class: 'conv-title', text: (conv.branch ? '⎇ ' : '') + title }));
       var lastMsg = conv.messages[conv.messages.length - 1];
       var who = lastMsg && lastMsg.role === 'user' ? '你：' : '';
       meta.appendChild(UI.el('div', { class: 'conv-preview', text: who + plainPreview(lastMsg) || '（空）' }));
@@ -205,11 +222,17 @@
       item.appendChild(UI.el('div', { class: 'conv-time', text: UI.fmtTime(conv.updatedAt) }));
 
       function menuItems() {
-        return [
-          { label: '重命名', icon: 'edit', onClick: function () { renameConv(conv); } },
-          { label: '清空消息', icon: 'broom', onClick: function () { clearConvMsgs(conv); } },
-          { label: '删除对话', icon: 'trash', danger: true, onClick: function () { removeConv(conv); } }
-        ];
+        var items = [];
+        if (conv.type === 'world') {
+          items.push(conv.branch
+            ? { label: '回到主线', icon: 'refresh', onClick: function () { switchToMainline(conv); } }
+            : null);
+          items.push({ label: '分支出世界线', icon: 'swap', onClick: function () { branchThisConv(conv); } });
+        }
+        items.push({ label: '重命名', icon: 'edit', onClick: function () { renameConv(conv); } });
+        items.push({ label: '清空消息', icon: 'broom', onClick: function () { clearConvMsgs(conv); } });
+        items.push({ label: '删除对话', icon: 'trash', danger: true, onClick: function () { removeConv(conv); } });
+        return items;
       }
       UI.bindContextMenu(item, menuItems);
       item.addEventListener('click', function () {
@@ -247,6 +270,7 @@
           { label: '继续冒险', icon: 'chat', onClick: function () { startWithWorld(w.id, false); } },
           { label: '开启新冒险', icon: 'plus', onClick: function () { startWithWorld(w.id, true); } },
           { label: '编辑世界', icon: 'edit', onClick: function () { openWorldForm(w); } },
+          { label: '导出世界', icon: 'download', onClick: function () { exportWorld(w); } },
           { label: '删除世界', icon: 'trash', danger: true, onClick: function () { removeWorld(w); } }
         ];
       });
@@ -360,9 +384,10 @@
       });
   }
   function clearConvMsgs(conv) {
+    var isSoloWorld = isWorldCharConv(conv);
     UI.confirmDialog({
       title: '清空消息',
-      message: conv.type === 'world' ? '将清空全部剧情记录，并把场景、时间与玩家状态重置回世界初始值。' : '将清空该对话的全部消息记录，且不可恢复。',
+      message: conv.type === 'world' ? '将清空全部剧情记录，并把场景、时间与玩家状态重置回世界初始值。' : (isSoloWorld ? '将清空私谈记录，场景回到「' + ((convWorldChar(conv) || {}).place || '初始') + '」。注意：已写入世界记忆的事实不会被删除。' : '将清空该对话的全部消息记录，且不可恢复。'),
       okText: '清空', danger: true
     })
       .then(function (yes) {
@@ -375,6 +400,13 @@
           conv.messages = (w && w.opening)
             ? [{ id: uid(), role: 'assistant', content: w.opening, reasoning: '', ts: Date.now() }]
             : [];
+        } else if (isSoloWorld) {
+          var ch = convWorldChar(conv) || {};
+          conv.scene = { location: ch.place || '', time: '' };
+          var opening = ch.greeting || (ch.place
+            ? '（' + ch.place + '。你见到了' + ch.name + (ch.tagline ? '——' + ch.tagline : '') + '。）'
+            : '（你见到了' + (ch.name || '对方') + '。）');
+          conv.messages = [{ id: uid(), role: 'assistant', content: opening, reasoning: '', ts: Date.now() }];
         } else {
           conv.messages = [];
         }
@@ -399,6 +431,69 @@
         state.characters = state.characters.filter(function (x) { return x.id !== ch.id; });
         Store.persist(); renderDrawer(); UI.toast('已删除');
       });
+  }
+
+  /* ---------------- 世界线分支 ---------------- */
+  function branchThisConv(conv) {
+    if (conv.type !== 'world') { UI.toast('只有世界冒险可以分支', 'err'); return; }
+    UI.confirmDialog({
+      title: '分支出世界线',
+      message: '将从当前剧情复制出一条平行世界线：之后的故事走向、玩家状态与世界记忆各自独立；世界规则与角色名册共享。原对话不受影响，可随时从对话列表或面板回到主线。',
+      okText: '创建分支'
+    })
+      .then(function (yes) {
+        if (!yes) return;
+        if (currentGen && currentGen.convId === conv.id) { UI.toast('请等当前剧情推进完成', 'err'); return; }
+        var b = Store.branchWorldConv(conv.id);
+        if (!b) { UI.toast('分支失败', 'err'); return; }
+        renderAll();
+        UI.toast('⎇ 已分支出「' + b.title + '」');
+      });
+  }
+  function switchToMainline(conv) {
+    if (!conv.branch) return;
+    var main = Store.getConv(conv.branch.of);
+    if (!main) { UI.toast('主线对话已被删除', 'err'); return; }
+    state.activeConvId = main.id;
+    Store.persist();
+    renderAll();
+    scrollToBottom(true);
+    UI.toast('已回到主线「' + main.title + '」');
+  }
+
+  /* ---------------- 世界导出 / 导入 ---------------- */
+  function exportWorld(w) {
+    var payload = { type: 'huanyu-world', version: 1, exportedAt: new Date().toISOString(), world: w };
+    var blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+    var a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = '世界-' + (w.name || '未命名') + '.json';
+    a.click();
+    setTimeout(function () { URL.revokeObjectURL(a.href); }, 2000);
+    UI.toast('已导出世界（含角色名册与记忆）');
+  }
+  function importWorldFile(file) {
+    if (!file) return;
+    var reader = new FileReader();
+    reader.onload = function () {
+      try {
+        var data = JSON.parse(reader.result);
+        var w = data && (data.world || data);
+        if (!w || !w.name || !Array.isArray(w.characters)) throw new Error('不是有效的世界文件');
+        var copy = JSON.parse(JSON.stringify(w));
+        copy.id = Store.uid();
+        copy.characters = copy.characters || [];
+        copy.knowledge = copy.knowledge || [];
+        copy.characters.forEach(function (c) { c.id = Store.uid(); });
+        state.worlds.push(copy);
+        Store.persist();
+        renderDrawer();
+        UI.toast('世界「' + copy.name + '」已导入');
+      } catch (err) {
+        UI.toast('导入失败：' + err.message, 'err');
+      }
+    };
+    reader.readAsText(file);
   }
 
   /* ---------------- 聊天区渲染 ---------------- */
@@ -444,6 +539,15 @@
       sub.textContent = persona ? (persona.tagline || '点击查看对话设置') : '点击选择一个角色';
     } else {
       sub.textContent = '开启一段新的冒险';
+    }
+    // 世界冒险: 头部快捷名册按钮
+    var rbtn = $('#rosterBtn');
+    var wForBtn = conv && conv.type === 'world' ? convWorld(conv) : null;
+    rbtn.hidden = !wForBtn;
+    // 私谈场景坐标
+    if (conv && isWorldCharConv(conv) && conv.scene && conv.scene.location) {
+      var el = $('#htSub');
+      el.textContent = '📍' + conv.scene.location + ' · ' + el.textContent;
     }
     renderStatusBar();
   }
@@ -537,6 +641,62 @@
       .filter(function (s) { return s.text && s.text.trim(); });
   }
 
+  /** 构建单个叙事段落节点(旁白 / NPC对白) */
+  function buildSegmentNode(roster, seg, withCaret) {
+    if (seg.type === 'narration') {
+      return UI.el('div', { class: 'narration md', html: MD.render(seg.text) + (withCaret ? '<span class="caret"></span>' : '') });
+    }
+    var chp = roster.find(function (c) { return c.name === seg.name; });
+    var row = UI.el('div', { class: 'speech' });
+    row.appendChild(avatarNode(chp, 'avatar sm'));
+    var wrap = UI.el('div', { class: 'speech-wrap' });
+    wrap.appendChild(UI.el('div', { class: 'speech-name', style: chp ? 'color:' + chp.color : '', text: seg.name }));
+    wrap.appendChild(UI.el('div', { class: 'bubble md', html: MD.render(seg.text) + (withCaret ? '<span class="caret"></span>' : '') }));
+    row.appendChild(wrap);
+    return row;
+  }
+
+  /** 流式期间增量更新世界叙事段落: 只改动变化的段落, 不重建已完成部分 */
+  function updateWorldSegments(node, conv, m) {
+    var world = convWorld(conv);
+    var roster = world ? (world.characters || []) : [];
+    var names = roster.map(function (c) { return c.name; });
+    var disp = String(m.content || '').split('⟦STATE⟧')[0];
+    if (!disp.trim()) return true; // 还在思考阶段, 打字气泡保持
+
+    var body = node.querySelector('.msg-body');
+    if (!body) return false;
+    var segs = parseWorldSegments(disp, names);
+    if (!segs.length) return true;
+
+    var typing = body.querySelector('.typing-bubble');
+    if (typing) typing.remove();
+
+    var rendered = node._segs || [];
+    var nodes = body.querySelectorAll(':scope > .narration, :scope > .speech');
+    for (var i = 0; i < segs.length; i++) {
+      var s = segs[i];
+      var p = rendered[i];
+      var existing = nodes[i] || null;
+      if (existing && p && p.type === s.type && p.name === s.name) {
+        if (p.len !== s.text.length) {
+          var html = MD.render(s.text) + (i === segs.length - 1 ? '<span class="caret"></span>' : '');
+          if (s.type === 'narration') existing.innerHTML = html;
+          else {
+            var b = existing.querySelector('.bubble');
+            if (b) b.innerHTML = html;
+          }
+        }
+      } else {
+        var fresh = buildSegmentNode(roster, s, i === segs.length - 1);
+        if (existing) existing.replaceWith(fresh);
+        else body.appendChild(fresh);
+      }
+    }
+    node._segs = segs.map(function (s) { return { type: s.type, name: s.name, len: s.text.length }; });
+    return true;
+  }
+
   /** 渲染世界冒险的一条 GM 叙事消息 */
   function buildWorldBody(conv, m, body) {
     var world = convWorld(conv);
@@ -554,20 +714,13 @@
 
     var segs = parseWorldSegments(disp, names);
     if (!segs.length) segs = [{ type: 'narration', name: null, text: disp.trim() }];
-    segs.forEach(function (seg) {
-      if (seg.type === 'narration') {
-        body.appendChild(UI.el('div', { class: 'narration md', html: MD.render(seg.text) }));
-      } else {
-        var chp = roster.find(function (c) { return c.name === seg.name; });
-        var row = UI.el('div', { class: 'speech' });
-        row.appendChild(avatarNode(chp, 'avatar sm'));
-        var wrap = UI.el('div', { class: 'speech-wrap' });
-        wrap.appendChild(UI.el('div', { class: 'speech-name', style: chp ? 'color:' + chp.color : '', text: seg.name }));
-        wrap.appendChild(UI.el('div', { class: 'bubble md', html: MD.render(seg.text) }));
-        row.appendChild(wrap);
-        body.appendChild(row);
-      }
+    var root = body.parentNode; // 用于记录段落渲染状态
+    segs.forEach(function (seg, i) {
+      body.appendChild(buildSegmentNode(roster, seg, false));
     });
+    if (root && root.hasAttribute && root.hasAttribute('data-mid')) {
+      root._segs = segs.map(function (s) { return { type: s.type, name: s.name, len: s.text.length }; });
+    }
 
     // 事件 / 新角色 / 状态变化 提示
     var meta = m.worldMeta;
@@ -607,16 +760,23 @@
     var world = convWorld(conv);
     var isSolo = isWorldCharConv(conv);
     var meta = m.worldMeta = m.worldMeta || {};
+    var kStore = conv.knowledge || (world && world.knowledge);
 
-    // 长期记忆 → 世界知识图谱（世界冒险与私谈共享, 私谈以角色名义归档）
-    if (Array.isArray(data.memories) && data.memories.length && world) {
-      var srcName = isSolo ? ((convWorldChar(conv) || {}).name || '私谈') : '世界';
-      var n = Store.addKnowledge(world, data.memories, srcName);
+    // 长期记忆 → 生效的知识图谱（主线共享世界图谱; 分支写分支快照; 私谈以角色名义归档）
+    if (Array.isArray(data.memories) && data.memories.length && kStore) {
+      var srcName = isSolo ? ((convWorldChar(conv) || {}).name || '私谈') : (conv.branch ? '分支' : '世界');
+      var n = Store.addKnowledge(kStore, data.memories, srcName);
       if (n > 0) meta.memories = n;
     }
 
-    // 私谈不改动世界的场景/状态/名册
-    if (isSolo) return true;
+    // 私谈: 记忆 + 场景变化即可, 不改动世界的状态/名册
+    if (isSolo) {
+      if (data.location && conv.scene) {
+        conv.scene.location = data.location;
+        meta.scene = { location: data.location };
+      }
+      return true;
+    }
 
     if (data.location || data.time) {
       conv.scene = conv.scene || {};
@@ -648,7 +808,7 @@
               greeting: nc.greeting || ''
             });
             // 新角色的名字与登场, 也写入知识图谱
-            Store.addKnowledge(w, [{ kind: '人物', text: nc.name + (nc.tagline ? '（' + nc.tagline + '）' : '') + '出现在世界中' }], '世界');
+            if (kStore) Store.addKnowledge(kStore, [{ kind: '人物', text: nc.name + (nc.tagline ? '（' + nc.tagline + '）' : '') + '出现在世界中' }], '世界');
           }
         }
         if (meta.newChars.indexOf(nc.name) < 0) meta.newChars.push(nc.name);
@@ -886,18 +1046,41 @@
     var rafId = 0;
     var hasFirstToken = false;
 
+    // 全量重建（仅在首 token / 收尾时使用）
     function updateDom() {
       rafId = 0;
       var node = msgInner.querySelector('[data-mid="' + m.id + '"]');
       if (!node) return;
       var stick = nearBottom();
-      // 重绘整条消息（保持简单可靠）
       var fresh = buildMsgEl(conv, m);
       node.replaceWith(fresh);
       if (stick) scrollToBottom();
     }
+    // 流式期间: 只增量更新内容, 不重建整条消息(避免头像图片重载导致闪屏)
+    function updateDomLight() {
+      rafId = 0;
+      var node = msgInner.querySelector('[data-mid="' + m.id + '"]');
+      if (!node) return;
+      var stick = nearBottom();
+      // 思考过程正文就地更新
+      var rb = node.querySelector('.reasoning .r-body');
+      if (rb && m.reasoning && rb.textContent !== m.reasoning) rb.textContent = m.reasoning;
+
+      if (conv.type === 'world') {
+        if (!updateWorldSegments(node, conv, m)) return updateDom();
+      } else {
+        var disp = String(m.content || '').split('⟦STATE⟧')[0];
+        var bub = node.querySelector('.bubble.md');
+        if (bub) {
+          bub.innerHTML = MD.render(disp) + '<span class="caret"></span>';
+        } else if (disp) {
+          return updateDom(); // 首个可见内容: 从打字气泡切换为正文
+        }
+      }
+      if (stick) scrollToBottom();
+    }
     function schedule() {
-      if (!rafId) rafId = requestAnimationFrame(updateDom);
+      if (!rafId) rafId = requestAnimationFrame(hasFirstToken ? updateDomLight : updateDom);
     }
 
     try {
@@ -923,7 +1106,7 @@
           if (!hasFirstToken) {
             hasFirstToken = true;
             m.thinkMs = Date.now() - thinkStart;
-            updateDom();
+            updateDom(); // 首token全量重建(落定思考用时标签), 之后走增量
           } else {
             schedule();
           }
@@ -1138,6 +1321,12 @@
     var tagIn = UI.el('input', { class: 'form-input', type: 'text', placeholder: '一句话简介，如「温柔的知心朋友」', value: ch.tagline || '' });
     body.appendChild(UI.formGroup('简介', tagIn));
 
+    if (world) {
+      var placeIn = UI.el('input', { class: 'form-input', type: 'text', placeholder: '如「银鹿酒馆吧台」「自家小院」，私谈将默认从这里开始', value: ch.place || '' });
+      body.appendChild(UI.formGroup('常在地点', placeIn, '私谈的默认场景'));
+      body._placeIn = placeIn;
+    }
+
     var sysTa = UI.el('textarea', { class: 'form-textarea', placeholder: '描述这个角色的身份、性格、说话风格、世界观…这是角色的灵魂，越具体越传神。' });
     sysTa.value = ch.system || '';
     sysTa.rows = 6;
@@ -1163,6 +1352,7 @@
       if (!system) { UI.toast('请填写人设/系统提示词', 'err'); sysTa.focus(); return; }
       ch.name = name; ch.emoji = selEmoji; ch.color = selColor;
       ch.tagline = tagIn.value.trim(); ch.system = system; ch.greeting = greetTa.value.trim();
+      if (world && body._placeIn) ch.place = body._placeIn.value.trim();
       var av = avatarCtl.get();
       if (av) ch.avatar = av; else delete ch.avatar;
       if (isNew) {
@@ -1394,6 +1584,22 @@
     });
     body.appendChild(scRow);
 
+    // 世界线（主线 / 分支）
+    var lineRow = UI.el('button', { class: 'set-row' });
+    lineRow.innerHTML = '<span class="sr-ico">' + UI.icon('swap') + '</span><span class="sr-text"><span class="sr-title">世界线' + (conv.branch ? ' · 分支' : ' · 主线') + '</span><span class="sr-desc">' +
+      (conv.branch ? '由「' + esc(conv.branch.ofTitle) + '」分出，剧情与记忆独立' : '从任意剧情处分支出平行世界线，互不干扰') + '</span></span><span class="sr-arrow">' + (conv.branch ? UI.icon('refresh') : UI.icon('plus')) + '</span>';
+    lineRow.addEventListener('click', function () {
+      if (conv.branch) switchToMainline(conv);
+      else branchThisConv(conv);
+    });
+    body.appendChild(lineRow);
+    if (conv.branch) {
+      var backRow = UI.el('button', { class: 'set-row' });
+      backRow.innerHTML = '<span class="sr-ico danger">' + UI.icon('refresh') + '</span><span class="sr-text"><span class="sr-title">回到主线</span><span class="sr-desc">切换回「' + esc(conv.branch.ofTitle) + '」，本分支保留在对话列表</span></span>';
+      backRow.addEventListener('click', function () { entry.close(); switchToMainline(conv); });
+      body.appendChild(backRow);
+    }
+
     // 角色名册
     if (w) {
       var rosterRow = UI.el('button', { class: 'set-row' });
@@ -1403,8 +1609,8 @@
 
       // 知识图谱
       var kgRow = UI.el('button', { class: 'set-row' });
-      kgRow.innerHTML = '<span class="sr-ico">' + UI.icon('sparkles') + '</span><span class="sr-text"><span class="sr-title">世界记忆 · 知识图谱</span><span class="sr-desc">' + (w.knowledge || []).length + ' 条事实 · 代替长历史节约 token</span></span><span class="sr-arrow">' + UI.icon('chevR') + '</span>';
-      kgRow.addEventListener('click', function () { openKnowledgeSheet(w); });
+      kgRow.innerHTML = '<span class="sr-ico">' + UI.icon('sparkles') + '</span><span class="sr-text"><span class="sr-title">世界记忆 · 知识图谱</span><span class="sr-desc">' + Store.effectiveKnowledge(conv).length + ' 条事实 · 代替长历史节约 token</span></span><span class="sr-arrow">' + UI.icon('chevR') + '</span>';
+      kgRow.addEventListener('click', function () { openKnowledgeSheet(w, conv); });
       body.appendChild(kgRow);
     }
 
@@ -1432,10 +1638,14 @@
     var entry = UI.openSheet({ title: '世界面板', body: body });
   }
 
-  /** 世界知识图谱（长期记忆）查看与编辑 */
-  function openKnowledgeSheet(world) {
-    world.knowledge = world.knowledge || [];
+  /** 世界知识图谱（长期记忆）查看与编辑；分支对话编辑的是分支自己的图谱 */
+  function openKnowledgeSheet(world, conv) {
+    var isBranch = !!(conv && conv.branch && conv.knowledge);
+    var store = isBranch ? conv.knowledge : (world.knowledge = world.knowledge || []);
     var body = UI.el('div', {});
+    if (isBranch) {
+      body.appendChild(UI.el('div', { style: 'font-size:12px;color:var(--warn);background:color-mix(in srgb, var(--warn) 12%, transparent);border-radius:10px;padding:8px 12px;margin-bottom:8px', text: '⎇ 当前是分支世界线：这里的记忆独立于主线，只影响本分支的剧情。' }));
+    }
     body.appendChild(UI.el('div', { style: 'font-size:12.5px;color:var(--text-3);padding:0 2px 10px;line-height:1.7', text: '世界以「知识图谱」方式记住剧情：只保留重要事实（人物/事件/地点/关系/物品），每次请求只注入这些事实 + 最近对话，而不是全部历史，大幅节约 token。世界冒险与世界角色私谈共享这份记忆。' }));
 
     var listWrap = UI.el('div', {});
@@ -1443,13 +1653,13 @@
 
     function renderList() {
       listWrap.innerHTML = '';
-      if (!world.knowledge.length) {
+      if (!store.length) {
         listWrap.appendChild(UI.el('div', { class: 'empty-tip', text: '还没有记忆，去世界里冒险吧' }));
         return;
       }
       var KINDS = ['人物', '事件', '地点', '关系', '物品'];
       var groups = {};
-      world.knowledge.forEach(function (k) {
+      store.forEach(function (k) {
         (groups[k.kind] = groups[k.kind] || []).push(k);
       });
       KINDS.forEach(function (kind) {
@@ -1461,7 +1671,8 @@
           row.innerHTML = '<span class="sr-text"><span class="sr-title" style="font-weight:500;font-size:13.5px">' + esc(k.text) + '</span><span class="sr-desc">来源：' + esc(k.src) + '</span></span>';
           var delB = UI.el('button', { class: 'mini-btn danger', text: '删除', style: 'flex:none' });
           delB.addEventListener('click', function () {
-            world.knowledge = world.knowledge.filter(function (x) { return x.id !== k.id; });
+            var idx = store.indexOf(k);
+            if (idx >= 0) store.splice(idx, 1);
             Store.persist(); renderList();
           });
           row.appendChild(delB);
@@ -1469,7 +1680,7 @@
         });
       });
       // 其他类别
-      var others = world.knowledge.filter(function (k) { return KINDS.indexOf(k.kind) < 0; });
+      var others = store.filter(function (k) { return KINDS.indexOf(k.kind) < 0; });
       if (others.length) {
         others.forEach(function (k) {
           var row = UI.el('div', { class: 'set-row' });
@@ -1489,7 +1700,7 @@
     addB.addEventListener('click', function () {
       var v = textIn.value.trim();
       if (!v) { UI.toast('请输入内容', 'err'); return; }
-      Store.addKnowledge(world, [{ kind: kindSel.value, text: v }], '玩家');
+      Store.addKnowledge(store, [{ kind: kindSel.value, text: v }], '玩家');
       textIn.value = '';
       Store.persist(); renderList(); UI.toast('已写入世界记忆');
     });
@@ -1679,6 +1890,8 @@
         });
     });
     body.appendChild(wipeBtn);
+
+    body.appendChild(UI.el('div', { class: 'ver-tag', text: '幻语 · 角色扮演对话 ' + (Store.APP_VERSION || '') }));
 
     UI.openSheet({ title: '后台设置', body: body });
 
