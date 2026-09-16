@@ -332,45 +332,78 @@
     $('[data-empty="char"]').hidden = !empty;
   }
 
+  function catOf(sk) {
+    var c = sk.cat || 'custom';
+    var known = (Store.SKILL_CATS || []).some(function (x) { return x.id === c; });
+    return known ? c : 'custom';
+  }
+  function catLabel(c) {
+    var def = (Store.SKILL_CATS || []).find(function (x) { return x.id === c; });
+    return def ? (def.emoji + ' ' + def.name) : c;
+  }
+  function groupSkills(filter) {
+    var groups = {};
+    var order = [];
+    state.skills.forEach(function (sk) {
+      if (filter && !filter(sk)) return;
+      var c = catOf(sk);
+      if (!groups[c]) { groups[c] = []; order.push(c); }
+      groups[c].push(sk);
+    });
+    // 按技能库分类的固定顺序排列
+    var cats = (Store.SKILL_CATS || []).map(function (x) { return x.id; });
+    order.sort(function (a, b) {
+      var ia = cats.indexOf(a), ib = cats.indexOf(b);
+      return (ia < 0 ? 99 : ia) - (ib < 0 ? 99 : ib);
+    });
+    return order.map(function (c) { return { cat: c, items: groups[c] }; });
+  }
+
+  function skillItemNode(sk) {
+    var item = UI.el('div', { class: 'skill-item' });
+    item.appendChild(UI.el('div', { class: 'skill-ico', html: UI.icon('sparkles') }));
+    var meta = UI.el('div', { class: 'skill-meta' });
+    meta.appendChild(UI.el('div', { class: 'skill-name', text: sk.name }));
+    meta.appendChild(UI.el('div', { class: 'skill-desc', text: sk.desc || sk.content }));
+    item.appendChild(meta);
+    var acts = UI.el('div', { class: 'skill-acts' });
+    var ins = UI.el('button', { class: 'mini-btn primary', text: '插入' });
+    var ed = UI.el('button', { class: 'mini-btn', text: '编辑' });
+    var del = UI.el('button', { class: 'mini-btn danger', text: '删除' });
+    ins.addEventListener('click', function () {
+      var box = $('#inputBox');
+      box.value = (box.value ? box.value + '\n' : '') + sk.content;
+      box.dispatchEvent(new Event('input'));
+      closeDrawer();
+      box.focus();
+    });
+    ed.addEventListener('click', function () { openSkillForm(sk); });
+    del.addEventListener('click', function () {
+      UI.confirmDialog({ title: '删除技能', message: '确定删除技能「' + sk.name + '」吗？已附加该技能的对话将不再受影响。', okText: '删除', danger: true })
+        .then(function (yes) {
+          if (!yes) return;
+          state.skills = state.skills.filter(function (x) { return x.id !== sk.id; });
+          state.conversations.forEach(function (c) { c.skills = (c.skills || []).filter(function (id) { return id !== sk.id; }); });
+          Store.persist(); renderDrawer(); renderSkillChips(); UI.toast('已删除');
+        });
+    });
+    acts.appendChild(ins); acts.appendChild(ed); acts.appendChild(del);
+    item.appendChild(acts);
+    return item;
+  }
+
   function renderSkillList(q) {
     var list = $('#skillList');
     list.innerHTML = '';
-    var empty = true;
-    state.skills.forEach(function (sk) {
-      if (q && ((sk.name + sk.content).toLowerCase().indexOf(q) < 0)) return;
-      empty = false;
-      var item = UI.el('div', { class: 'skill-item' });
-      item.appendChild(UI.el('div', { class: 'skill-ico', html: UI.icon('sparkles') }));
-      var meta = UI.el('div', { class: 'skill-meta' });
-      meta.appendChild(UI.el('div', { class: 'skill-name', text: sk.name }));
-      meta.appendChild(UI.el('div', { class: 'skill-desc', text: sk.content }));
-      item.appendChild(meta);
-      var acts = UI.el('div', { class: 'skill-acts' });
-      var ins = UI.el('button', { class: 'mini-btn primary', text: '插入' });
-      var ed = UI.el('button', { class: 'mini-btn', text: '编辑' });
-      var del = UI.el('button', { class: 'mini-btn danger', text: '删除' });
-      ins.addEventListener('click', function () {
-        var box = $('#inputBox');
-        box.value = (box.value ? box.value + '\n' : '') + sk.content;
-        box.dispatchEvent(new Event('input'));
-        closeDrawer();
-        box.focus();
-      });
-      ed.addEventListener('click', function () { openSkillForm(sk); });
-      del.addEventListener('click', function () {
-        UI.confirmDialog({ title: '删除技能', message: '确定删除技能「' + sk.name + '」吗？已附加该技能的对话将不再受影响。', okText: '删除', danger: true })
-          .then(function (yes) {
-            if (!yes) return;
-            state.skills = state.skills.filter(function (x) { return x.id !== sk.id; });
-            state.conversations.forEach(function (c) { c.skills = (c.skills || []).filter(function (id) { return id !== sk.id; }); });
-            Store.persist(); renderDrawer(); renderSkillChips(); UI.toast('已删除');
-          });
-      });
-      acts.appendChild(ins); acts.appendChild(ed); acts.appendChild(del);
-      item.appendChild(acts);
-      list.appendChild(item);
+    var kw = (q || '').toLowerCase();
+    var groups = groupSkills(function (sk) {
+      return !kw || ((sk.name + (sk.desc || '') + sk.content).toLowerCase().indexOf(kw) >= 0);
     });
-    $('[data-empty="skill"]').hidden = !empty;
+    groups.forEach(function (g) {
+      list.appendChild(UI.el('div', { class: 'divider-label', text: catLabel(g.cat) }));
+      g.items.forEach(function (sk) { list.appendChild(skillItemNode(sk)); });
+    });
+    $('[data-empty="skill"]').hidden = groups.length > 0;
   }
 
   function renameConv(conv) {
@@ -1201,17 +1234,21 @@
 
   function openAttachSheet(conv) {
     var body = UI.el('div', {});
-    body.appendChild(UI.el('div', { style: 'font-size:12.5px;color:var(--text-3);padding:0 2px 10px', text: '附加的技能将作为长期指令注入本对话的角色设定中。' }));
-    state.skills.forEach(function (sk) {
-      var on = (conv.skills || []).indexOf(sk.id) >= 0;
-      var row = UI.switchRow(sk.name, sk.content.slice(0, 42) + (sk.content.length > 42 ? '…' : ''), on, function (v) {
-        conv.skills = conv.skills || [];
-        if (v) conv.skills.push(sk.id);
-        else conv.skills = conv.skills.filter(function (i) { return i !== sk.id; });
-        Store.persist();
-        renderSkillChips();
+    body.appendChild(UI.el('div', { style: 'font-size:12.5px;color:var(--text-3);padding:0 2px 10px', text: '附加的技能将按分类注入本对话，作为长期写作指令逐条生效。' }));
+    var groups = groupSkills();
+    groups.forEach(function (g) {
+      body.appendChild(UI.el('div', { class: 'divider-label', text: catLabel(g.cat) }));
+      g.items.forEach(function (sk) {
+        var on = (conv.skills || []).indexOf(sk.id) >= 0;
+        var row = UI.switchRow(sk.name, sk.desc || '', on, function (v) {
+          conv.skills = conv.skills || [];
+          if (v) conv.skills.push(sk.id);
+          else conv.skills = conv.skills.filter(function (i) { return i !== sk.id; });
+          Store.persist();
+          renderSkillChips();
+        });
+        body.appendChild(row);
       });
-      body.appendChild(row);
     });
     if (!state.skills.length) {
       body.appendChild(UI.el('div', { class: 'empty-tip', text: '技能库还是空的' }));
@@ -1456,11 +1493,21 @@
   /* ---------------- 技能编辑表单 ---------------- */
   function openSkillForm(sk, onSaved) {
     var isNew = !sk;
-    sk = sk || { id: uid(), name: '', content: '' };
+    sk = sk || { id: uid(), cat: 'custom', name: '', desc: '', content: '' };
     var body = UI.el('div', {});
-    var nameIn = UI.el('input', { class: 'form-input', type: 'text', placeholder: '技能名称，如「细节描写增强」', value: sk.name });
+    var nameIn = UI.el('input', { class: 'form-input', type: 'text', placeholder: '技能名称，如「杀八股 · 去AI味」', value: sk.name });
     body.appendChild(UI.formGroup('名称', nameIn));
-    var ta = UI.el('textarea', { class: 'form-textarea', rows: 7, placeholder: '技能内容：希望模型遵循的具体指令。例如写作风格、输出格式、语言要求…' });
+    var descIn = UI.el('input', { class: 'form-input', type: 'text', placeholder: '一句话描述，显示在技能列表中（选填）', value: sk.desc || '' });
+    body.appendChild(UI.formGroup('描述', descIn));
+    var catSel = UI.el('select', { class: 'form-input' });
+    (Store.SKILL_CATS || []).forEach(function (c) {
+      var op = document.createElement('option');
+      op.value = c.id; op.textContent = c.emoji + ' ' + c.name;
+      if (catOf(sk) === c.id) op.selected = true;
+      catSel.appendChild(op);
+    });
+    body.appendChild(UI.formGroup('分类', catSel));
+    var ta = UI.el('textarea', { class: 'form-textarea', rows: 7, placeholder: '技能内容：希望模型遵循的具体指令。例如写作风格、禁用套话、输出格式、语言要求…' });
     ta.value = sk.content || '';
     body.appendChild(UI.formGroup('内容 / 指令', ta));
     var acts = UI.el('div', { class: 'form-acts' });
@@ -1474,7 +1521,10 @@
     save.addEventListener('click', function () {
       if (!nameIn.value.trim()) { UI.toast('请填写技能名称', 'err'); return; }
       if (!ta.value.trim()) { UI.toast('请填写技能内容', 'err'); return; }
-      sk.name = nameIn.value.trim(); sk.content = ta.value.trim();
+      sk.name = nameIn.value.trim();
+      sk.desc = descIn.value.trim();
+      sk.cat = catSel.value || 'custom';
+      sk.content = ta.value.trim();
       if (isNew) state.skills.push(sk);
       Store.persist();
       renderDrawer(); renderSkillChips();
