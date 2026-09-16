@@ -886,3 +886,11 @@ svg.ic { width: 22px; height: 22px; display: block; fill: none; stroke: currentC
 @media (prefers-reduced-motion: reduce) {
   * { animation-duration: .01ms !important; transition-duration: .01ms !important; }
 }
+
+/* 技能商城入口（与主操作按钮区分的次级样式） */
+.add-btn.store-entry {
+  background: var(--panel-2); color: var(--text-1);
+  box-shadow: none; border: 1px dashed var(--line, rgba(128,128,128,.35));
+  font-weight: 500;
+}
+.add-btn.store-entry:active { filter: brightness(.96); }

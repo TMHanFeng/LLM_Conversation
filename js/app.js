@@ -174,6 +174,7 @@
   });
   $('#addCharBtn').addEventListener('click', function () { openCharForm(null); });
   $('#addSkillBtn').addEventListener('click', function () { openSkillForm(null); });
+  $('#skillStoreBtn').addEventListener('click', function () { openSkillStore(); });
   $('#settingsBtn').addEventListener('click', function () { openSettings(); });
   $('#headerTitle').addEventListener('click', function () {
     var conv = Store.activeConv();
@@ -392,18 +393,27 @@
     return item;
   }
 
+  function isShown(sk) { return sk.shown !== false; }
+
   function renderSkillList(q) {
     var list = $('#skillList');
     list.innerHTML = '';
     var kw = (q || '').toLowerCase();
     var groups = groupSkills(function (sk) {
-      return !kw || ((sk.name + (sk.desc || '') + sk.content).toLowerCase().indexOf(kw) >= 0);
+      return isShown(sk) && (!kw || ((sk.name + (sk.desc || '') + sk.content).toLowerCase().indexOf(kw) >= 0));
     });
     groups.forEach(function (g) {
       list.appendChild(UI.el('div', { class: 'divider-label', text: catLabel(g.cat) }));
       g.items.forEach(function (sk) { list.appendChild(skillItemNode(sk)); });
     });
     $('[data-empty="skill"]').hidden = groups.length > 0;
+    // 技能商城入口文案：侧栏已上架 / 总数
+    var storeBtn = $('#skillStoreBtn');
+    if (storeBtn) {
+      var shownCount = state.skills.filter(isShown).length;
+      var newCount = state.skills.filter(function (sk) { return !isShown(sk); }).length;
+      storeBtn.textContent = '🛍️ 技能商城 · 已上架 ' + shownCount + ' / ' + state.skills.length + (newCount ? '（' + newCount + ' 个待上架）' : '');
+    }
   }
 
   function renameConv(conv) {
@@ -1235,7 +1245,7 @@
   function openAttachSheet(conv) {
     var body = UI.el('div', {});
     body.appendChild(UI.el('div', { style: 'font-size:12.5px;color:var(--text-3);padding:0 2px 10px', text: '附加的技能将按分类注入本对话，作为长期写作指令逐条生效。' }));
-    var groups = groupSkills();
+    var groups = groupSkills(function (sk) { return isShown(sk); });
     groups.forEach(function (g) {
       body.appendChild(UI.el('div', { class: 'divider-label', text: catLabel(g.cat) }));
       g.items.forEach(function (sk) {
@@ -1250,17 +1260,86 @@
         body.appendChild(row);
       });
     });
-    if (!state.skills.length) {
-      body.appendChild(UI.el('div', { class: 'empty-tip', text: '技能库还是空的' }));
+    if (!state.skills.filter(isShown).length) {
+      body.appendChild(UI.el('div', { class: 'empty-tip', text: '技能库还是空的，去技能商城上架几个吧' }));
     }
-    var foot = UI.el('button', { class: 'btn plain block', text: '前往技能库管理' });
+    var footWrap = UI.el('div', { style: 'display:flex;gap:8px' });
+    var footStore = UI.el('button', { class: 'btn plain block', text: '🛍️ 技能商城' });
+    var foot = UI.el('button', { class: 'btn primary block', text: '管理技能库' });
     var entry = null;
+    footWrap.appendChild(footStore); footWrap.appendChild(foot);
+    footStore.addEventListener('click', function () {
+      if (entry) entry.close();
+      document.querySelector('.dtab[data-tab="skill"]').click();
+      closeDrawerIfMobile(); openDrawer();
+      openSkillStore();
+    });
     foot.addEventListener('click', function () {
       if (entry) entry.close();
       document.querySelector('.dtab[data-tab="skill"]').click();
       closeDrawerIfMobile(); openDrawer();
     });
-    entry = UI.openSheet({ title: '附加技能 · ' + (conv.title || ''), body: body, footer: foot });
+    entry = UI.openSheet({ title: '附加技能 · ' + (conv.title || ''), body: body, footer: footWrap });
+  }
+
+  /* ---------------- 技能商城 ---------------- */
+  function openSkillStore() {
+    var body = UI.el('div', {});
+    body.appendChild(UI.el('div', { style: 'font-size:12.5px;color:var(--text-3);padding:0 2px 10px', text: '全部技能都在这里。勾选后才会出现在侧栏技能库，可随时增删。' }));
+    var search = UI.el('input', { class: 'form-input', type: 'text', placeholder: '🔍 搜索技能名称 / 描述…', style: 'margin-bottom:10px' });
+    body.appendChild(search);
+    var listBox = UI.el('div', {});
+    body.appendChild(listBox);
+
+    var footInfo = UI.el('span', { style: 'flex:1;text-align:left;font-size:12.5px;color:var(--text-3)' });
+    var footWrap = UI.el('div', { style: 'display:flex;align-items:center;gap:8px' });
+    var allOn = UI.el('button', { class: 'mini-btn', text: '全上架' });
+    var allOff = UI.el('button', { class: 'mini-btn', text: '全下架' });
+    footWrap.appendChild(footInfo); footWrap.appendChild(allOn); footWrap.appendChild(allOff);
+
+    function updateFoot() {
+      var shown = state.skills.filter(isShown).length;
+      footInfo.textContent = '已上架 ' + shown + ' / ' + state.skills.length + ' 个技能';
+    }
+    function renderList(q) {
+      var kw = (q || '').toLowerCase();
+      var groups = groupSkills(function (sk) {
+        return !kw || ((sk.name + (sk.desc || '') + sk.content).toLowerCase().indexOf(kw) >= 0);
+      });
+      listBox.innerHTML = '';
+      if (!groups.length) {
+        listBox.appendChild(UI.el('div', { class: 'empty-tip', text: '没有匹配的技能' }));
+        return;
+      }
+      groups.forEach(function (g) {
+        listBox.appendChild(UI.el('div', { class: 'divider-label', text: catLabel(g.cat) + ' · ' + g.items.length }));
+        g.items.forEach(function (sk) {
+          var row = UI.switchRow(sk.name, sk.desc || sk.content.slice(0, 46) + (sk.content.length > 46 ? '…' : ''), isShown(sk), function (v) {
+            sk.shown = v;
+            Store.persist();
+            renderDrawer();
+            renderSkillChips();
+            updateFoot();
+          });
+          listBox.appendChild(row);
+        });
+      });
+    }
+    search.addEventListener('input', function () { renderList(search.value.trim()); });
+    allOn.addEventListener('click', function () {
+      state.skills.forEach(function (sk) { sk.shown = true; });
+      Store.persist(); renderDrawer(); renderSkillChips(); updateFoot(); renderList(search.value.trim());
+      UI.toast('全部技能已上架');
+    });
+    allOff.addEventListener('click', function () {
+      state.skills.forEach(function (sk) { sk.shown = false; });
+      Store.persist(); renderDrawer(); renderSkillChips(); updateFoot(); renderList(search.value.trim());
+      UI.toast('全部技能已下架（对话中已附加的不受影响）');
+    });
+
+    renderList('');
+    updateFoot();
+    UI.openSheet({ title: '🛍️ 技能商城', body: body, footer: footWrap });
   }
 
   function closeDrawerIfMobile() {
@@ -1493,7 +1572,7 @@
   /* ---------------- 技能编辑表单 ---------------- */
   function openSkillForm(sk, onSaved) {
     var isNew = !sk;
-    sk = sk || { id: uid(), cat: 'custom', name: '', desc: '', content: '' };
+    sk = sk || { id: uid(), cat: 'custom', name: '', desc: '', content: '', shown: true };
     var body = UI.el('div', {});
     var nameIn = UI.el('input', { class: 'form-input', type: 'text', placeholder: '技能名称，如「杀八股 · 去AI味」', value: sk.name });
     body.appendChild(UI.formGroup('名称', nameIn));
