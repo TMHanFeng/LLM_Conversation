@@ -1,6 +1,6 @@
 /* 幻语 · 极简 Service Worker：网络优先，离线兜底 */
 'use strict';
-const CACHE = 'huanyu-v1.3.1';
+const CACHE = 'huanyu-v1.3';
 const ASSETS = ['./', './index.html', './css/style.css', './js/markdown.js', './js/store.js', './js/api.js', './js/ui.js', './js/app.js', './manifest.json', './icon.svg'];
 
 self.addEventListener('install', (e) => {

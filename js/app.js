@@ -368,27 +368,15 @@
     meta.appendChild(UI.el('div', { class: 'skill-desc', text: sk.desc || sk.content }));
     item.appendChild(meta);
     var acts = UI.el('div', { class: 'skill-acts' });
-    var att = UI.el('button', { class: 'mini-btn', text: '附加' });
+    var ins = UI.el('button', { class: 'mini-btn primary', text: '插入' });
     var ed = UI.el('button', { class: 'mini-btn', text: '编辑' });
     var del = UI.el('button', { class: 'mini-btn danger', text: '删除' });
-    function syncAttBtn() {
-      var conv = Store.activeConv();
-      var on = !!(conv && (conv.skills || []).indexOf(sk.id) >= 0);
-      att.textContent = on ? '已附加' : '附加';
-      att.classList.toggle('primary', on);
-    }
-    syncAttBtn();
-    att.addEventListener('click', function () {
-      var conv = Store.activeConv();
-      if (!conv) { UI.toast('请先选择一个对话', 'err'); return; }
-      conv.skills = conv.skills || [];
-      var on = conv.skills.indexOf(sk.id) >= 0;
-      if (on) conv.skills = conv.skills.filter(function (i) { return i !== sk.id; });
-      else conv.skills.push(sk.id);
-      Store.persist();
-      syncAttBtn();
-      renderSkillChips();
-      UI.toast(on ? '已取消附加「' + sk.name + '」' : '已附加「' + sk.name + '」，本对话长期生效');
+    ins.addEventListener('click', function () {
+      var box = $('#inputBox');
+      box.value = (box.value ? box.value + '\n' : '') + sk.content;
+      box.dispatchEvent(new Event('input'));
+      closeDrawer();
+      box.focus();
     });
     ed.addEventListener('click', function () { openSkillForm(sk); });
     del.addEventListener('click', function () {
@@ -400,7 +388,7 @@
           Store.persist(); renderDrawer(); renderSkillChips(); UI.toast('已删除');
         });
     });
-    acts.appendChild(att); acts.appendChild(ed); acts.appendChild(del);
+    acts.appendChild(ins); acts.appendChild(ed); acts.appendChild(del);
     item.appendChild(acts);
     return item;
   }
