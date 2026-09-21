@@ -2173,6 +2173,8 @@
     $('#headerNewBtn').innerHTML = UI.icon('plus');
     document.querySelector('.search-ico').innerHTML = UI.icon('search');
     document.querySelectorAll('.ic-plus').forEach(function (s) { s.innerHTML = UI.icon('plus'); s.style.display = 'flex'; });
+    var vb = $('#verBadge');
+    if (vb && Store.APP_VERSION) vb.textContent = Store.APP_VERSION;
   }
 
   function init() {

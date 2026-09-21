@@ -140,6 +140,14 @@ svg.ic { width: 22px; height: 22px; display: block; fill: none; stroke: currentC
 .brand-text { flex: 1; line-height: 1.25; }
 .brand-text b { font-size: 16px; display: block; }
 .brand-text span { font-size: 11px; color: var(--text-3); }
+/* 版本徽章:「幻语」名字右侧 */
+.ver-badge {
+  display: inline-block; vertical-align: 2px; margin-left: 6px;
+  font-size: 10px; font-weight: 600; letter-spacing: .02em;
+  color: var(--accent); background: var(--accent-soft);
+  border: 1px solid var(--line);
+  border-radius: 999px; padding: 1px 7px; line-height: 1.4;
+}
 
 .search-wrap {
   display: flex; align-items: center; gap: 8px;
