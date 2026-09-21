@@ -690,6 +690,12 @@
       return UI.el('div', { class: 'narration md', html: MD.render(seg.text) + (withCaret ? '<span class="caret"></span>' : '') });
     }
     var chp = roster.find(function (c) { return c.name === seg.name; });
+    if (!chp && seg.name) {
+      // 发言人尚未入册(流式中新角色): 按名字稳定取色, 状态块应用后自动换成正式角色卡
+      var seed = 0;
+      for (var i = 0; i < seg.name.length; i++) seed += seg.name.charCodeAt(i);
+      chp = { name: seg.name, emoji: '🎭', color: Store.COLORS[seed % Store.COLORS.length] };
+    }
     var row = UI.el('div', { class: 'speech' });
     row.appendChild(avatarNode(chp, 'avatar sm'));
     var wrap = UI.el('div', { class: 'speech-wrap' });
@@ -861,7 +867,7 @@
   }
 
   function buildMsgEl(conv, m) {
-    var ch = convChar(conv);
+    var ch = convPersona(conv);
     var isUser = m.role === 'user';
     var isWorldMsg = conv.type === 'world' && !isUser;
     var root = UI.el('div', { class: 'msg ' + m.role + (isWorldMsg ? ' world' : ''), 'data-mid': m.id });

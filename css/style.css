@@ -388,6 +388,9 @@ svg.ic { width: 22px; height: 22px; display: block; fill: none; stroke: currentC
   white-space: pre-wrap;
   border-top: 1px dashed var(--line);
   padding-top: 8px;
+}
+/* 仅生成中的思考限制高度滚动; 展开已完成的思考时显示全部内容 */
+.reasoning.thinking .r-body {
   max-height: 260px; overflow-y: auto;
 }
 .reasoning.thinking summary { color: var(--accent); }
