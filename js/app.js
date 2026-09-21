@@ -920,7 +920,7 @@
         return UI.el('button', { class: 'act-btn', html: UI.icon(ic), title: title, 'data-act': act, 'data-mid': m.id });
       };
       actsRow.appendChild(mk('copy', '复制', 'copy'));
-      if (isUser) actsRow.appendChild(mk('edit', '编辑', 'edit'));
+      actsRow.appendChild(mk('edit', '编辑', 'edit'));
       if (!isUser) actsRow.appendChild(mk('refresh', '重新生成', 'regen'));
       actsRow.appendChild(mk('trash', '删除', 'del'));
       body.appendChild(actsRow);
@@ -974,11 +974,12 @@
     } else if (act === 'regen') {
       regenFrom(conv, m);
     } else if (act === 'edit') {
-      editUserMessage(conv, m);
+      editMessage(conv, m);
     }
   });
 
-  function editUserMessage(conv, m) {
+  /** 消息编辑: 用户消息可"保存并重问"; AI 消息可直接改写内容以引导剧情 */
+  function editMessage(conv, m) {
     var el = msgInner.querySelector('[data-mid="' + m.id + '"] .bubble');
     if (!el) return;
     var wrap = UI.el('div', { class: 'bubble-edit' });
@@ -986,9 +987,13 @@
     wrap.appendChild(ta);
     var acts = UI.el('div', { class: 'bubble-edit-acts' });
     var cancel = UI.el('button', { class: 'mini-btn', text: '取消' });
-    var save = UI.el('button', { class: 'mini-btn', text: '保存' });
-    var regen = UI.el('button', { class: 'mini-btn primary', text: '保存并重问' });
-    acts.appendChild(cancel); acts.appendChild(save); acts.appendChild(regen);
+    var save = UI.el('button', { class: 'mini-btn primary', text: '保存' });
+    acts.appendChild(cancel); acts.appendChild(save);
+    if (m.role === 'user') {
+      var regen = UI.el('button', { class: 'mini-btn primary', text: '保存并重问' });
+      acts.appendChild(regen);
+      regen.addEventListener('click', function () { doSave(true); });
+    }
     wrap.appendChild(acts);
     el.replaceWith(wrap);
     ta.focus();
@@ -998,6 +1003,7 @@
       if (!v) { UI.toast('内容不能为空', 'err'); return; }
       m.content = v;
       m.ts = Date.now();
+      conv.updatedAt = Date.now(); // 供云端按"新者胜"合并
       Store.persist();
       if (andRegen) {
         regenFrom(conv, m);
@@ -1006,7 +1012,6 @@
       }
     }
     save.addEventListener('click', function () { doSave(false); });
-    regen.addEventListener('click', function () { doSave(true); });
   }
 
   /** 从某条消息处截断并重新生成（m 为最后保留的用户消息，或待重写的助手消息） */
@@ -1477,6 +1482,7 @@
       if (world && body._placeIn) ch.place = body._placeIn.value.trim();
       var av = avatarCtl.get();
       if (av) ch.avatar = av; else delete ch.avatar;
+      ch.updatedAt = Date.now();
       if (isNew) {
         if (world) world.characters.push(ch);
         else state.characters.push(ch);
@@ -1566,6 +1572,7 @@
       w.characters = w.characters || [];
       var av = avatarCtl.get();
       if (av) w.avatar = av; else delete w.avatar;
+      w.updatedAt = Date.now();
       if (isNew) state.worlds.push(w);
       Store.persist();
       renderDrawer();
@@ -1610,6 +1617,7 @@
       sk.desc = descIn.value.trim();
       sk.cat = catSel.value || 'custom';
       sk.content = ta.value.trim();
+      sk.updatedAt = Date.now();
       if (isNew) state.skills.push(sk);
       Store.persist();
       renderDrawer(); renderSkillChips();
@@ -1893,9 +1901,92 @@
   }
 
   /* ---------------- 全局设置（后台） ---------------- */
+  /* ---------------- 账号与云端同步（设置面板区块） ---------------- */
+  function buildCloudBlock(reopen) {
+    var wrap = UI.el('div', { id: 'cloudBlock' });
+    wrap.appendChild(UI.el('div', { style: 'font-size:12px;font-weight:700;color:var(--text-3);letter-spacing:.06em;padding:2px 2px 8px', text: '账号与云端同步' }));
+
+    if (Store.cloud.user) {
+      var syncTime = Store.cloud.lastSync ? UI.fmtTime(Store.cloud.lastSync) : '—';
+      var info = UI.el('div', { style: 'display:flex;align-items:center;gap:10px;padding:2px 2px 10px' });
+      var av = UI.el('div', { class: 'avatar sm', style: 'background:linear-gradient(135deg,#4f6bff,#7b5bff);width:36px;height:36px;border-radius:12px;display:grid;place-items:center;color:#fff;font-weight:700', text: Store.cloud.user.slice(0, 1).toUpperCase() });
+      var t = UI.el('div', { style: 'flex:1;min-width:0' });
+      t.appendChild(UI.el('div', { style: 'font-weight:700;font-size:14px', text: Store.cloud.user }));
+      t.appendChild(UI.el('div', { style: 'font-size:12px;color:var(--text-3)', text: '上次同步 ' + syncTime + ' · 改动会自动上传' }));
+      info.appendChild(av); info.appendChild(t);
+      wrap.appendChild(info);
+
+      var btnRow = UI.el('div', { class: 'form-row', style: 'margin-bottom:10px' });
+      var syncBtn = UI.el('button', { class: 'btn primary small', style: 'flex:1', text: '立即同步' });
+      var outBtn = UI.el('button', { class: 'btn plain small', style: 'flex:1', text: '退出登录' });
+      btnRow.appendChild(syncBtn); btnRow.appendChild(outBtn);
+      wrap.appendChild(btnRow);
+
+      syncBtn.addEventListener('click', function () {
+        syncBtn.disabled = true; syncBtn.textContent = '同步中…';
+        Store.cloud.push().then(function () { return Store.cloud.pull(); })
+          .then(function (r) {
+            UI.toast('已同步' + (r && (r.added || r.updated) ? '：云端合并 ' + r.added + ' 新 / ' + r.updated + ' 更新' : '，云端已是最新'));
+            reopen();
+          })
+          .catch(function (e) { syncBtn.disabled = false; syncBtn.textContent = '立即同步'; UI.toast((e && e.message) || '同步失败', 'err'); });
+      });
+      outBtn.addEventListener('click', function () {
+        UI.confirmDialog({ title: '退出登录', message: '退出后回到纯本地模式，本机数据保留；云端存档保留在服务器，下次登录自动同步。', okText: '退出' })
+          .then(function (yes) {
+            if (!yes) return;
+            Store.cloud.logout().then(function () { UI.toast('已退出登录'); reopen(); });
+          });
+      });
+      return wrap;
+    }
+
+    // 未登录: 登录 / 注册表单
+    var tip = UI.el('div', { style: 'font-size:12.5px;color:var(--text-2);background:var(--accent-soft);border-radius:12px;padding:10px 13px;margin:0 0 10px;line-height:1.7' });
+    tip.innerHTML = '当前为<b>本地模式</b>。登录后聊天记录自动保存到服务器，多设备共用一份存档；本机已有数据会在登录时自动合并上云。';
+    wrap.appendChild(tip);
+    var userIn = UI.el('input', { class: 'form-input', type: 'text', placeholder: '用户名（2-24位，中文/字母/数字）', autocomplete: 'username' });
+    wrap.appendChild(UI.formGroup('用户名', userIn));
+    var passIn = UI.el('input', { class: 'form-input', type: 'password', placeholder: '密码（至少 6 位）', autocomplete: 'current-password' });
+    wrap.appendChild(UI.formGroup('密码', passIn));
+    var acts = UI.el('div', { class: 'form-row', style: 'margin-bottom:10px' });
+    var loginBtn = UI.el('button', { class: 'btn primary small', style: 'flex:1', text: '登录' });
+    var regBtn = UI.el('button', { class: 'btn plain small', style: 'flex:1', text: '注册新账号' });
+    acts.appendChild(loginBtn); acts.appendChild(regBtn);
+    wrap.appendChild(acts);
+
+    function submit(mode) {
+      var u = userIn.value.trim(), p = passIn.value;
+      if (!u || !p) { UI.toast('请输入用户名和密码', 'err'); return; }
+      loginBtn.disabled = regBtn.disabled = true;
+      var doing = mode === 'login' ? '登录中…' : '注册中…';
+      loginBtn.textContent = doing; regBtn.textContent = doing;
+      var fn = mode === 'login' ? Store.cloud.login : Store.cloud.register;
+      fn(u, p).then(function (r) {
+        UI.toast('欢迎，' + Store.cloud.user + '！本地数据已合并到云端');
+        if (r && (r.added || r.updated)) renderAll();
+        reopen();
+      }).catch(function (e) {
+        loginBtn.disabled = regBtn.disabled = false;
+        loginBtn.textContent = '登录'; regBtn.textContent = '注册新账号';
+        UI.toast((e && e.message) || '操作失败', 'err');
+      });
+    }
+    loginBtn.addEventListener('click', function () { submit('login'); });
+    regBtn.addEventListener('click', function () { submit('register'); });
+    passIn.addEventListener('keydown', function (e) { if (e.key === 'Enter') submit('login'); });
+    return wrap;
+  }
+
   function openSettings() {
     var st = state.settings;
     var body = UI.el('div', {});
+    var settingsEntry = null;
+
+    body.appendChild(buildCloudBlock(function () {
+      if (settingsEntry) settingsEntry.close();
+      setTimeout(openSettings, 180);
+    }));
 
     body.appendChild(UI.el('div', { style: 'font-size:12px;font-weight:700;color:var(--text-3);letter-spacing:.06em;padding:2px 2px 8px', text: '接口模式' }));
     body.appendChild(UI.segControl(
@@ -2028,7 +2119,7 @@
 
     body.appendChild(UI.el('div', { class: 'ver-tag', text: '幻语 · 角色扮演对话 ' + (Store.APP_VERSION || '') }));
 
-    UI.openSheet({ title: '后台设置', body: body });
+    settingsEntry = UI.openSheet({ title: '后台设置', body: body });
 
     // 自定义/演示 切换显示
     function refreshMode() {
@@ -2089,6 +2180,15 @@
     initIcons();
     renderAll();
     if (window.innerWidth > 860) { /* 桌面端抽屉常驻 */ }
+    // 云端同步: 恢复 Cookie 登录态并拉取合并（静默, 出错不影响本地使用）
+    if (location.protocol === 'http:' || location.protocol === 'https:') {
+      Store.cloud.init().then(function (r) {
+        if (r && (r.added || r.updated)) {
+          renderAll();
+          UI.toast('已从云端同步：新增 ' + r.added + '，更新 ' + r.updated + ' 项');
+        }
+      });
+    }
   }
   init();
 

@@ -1,4 +1,4 @@
-/* 幻语 · 零依赖本地服务器：静态托管 + LLM 接口转发（解决浏览器 CORS 限制）
+/* 幻语 · 零依赖本地服务器：静态托管 + LLM 接口转发（解决浏览器 CORS 限制）+ 账号与云端存档
  * 用法:  node server.js   然后浏览器打开 http://localhost:3000
  * 手机访问同一局域网内显示的地址即可。
  */
@@ -9,6 +9,7 @@ const https = require('https');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const crypto = require('crypto');
 const { URL } = require('url');
 
 const PORT = Number(process.env.PORT || 3000);
@@ -180,6 +181,150 @@ function handleMock(req, res) {
   });
 }
 
+/* ================= 账号与云端存档 =================
+ * 零依赖实现：账号为 data/accounts/<用户名>.json（scrypt 加盐哈希存密码），
+ * 会话令牌持久化在 data/sessions.json —— 服务重启后浏览器 Cookie 依然保持登录，
+ * 直到用户主动退出。每个账号云端保存一份与浏览器 localStorage 同构的完整状态。
+ */
+const DATA_DIR = path.join(ROOT, 'data');
+const ACCOUNTS_DIR = path.join(DATA_DIR, 'accounts');
+const SESSIONS_FILE = path.join(DATA_DIR, 'sessions.json');
+const STATE_MAX = 64 * 1024 * 1024; // 单份存档上限 64MB
+
+function ensureDataDirs() {
+  fs.mkdirSync(ACCOUNTS_DIR, { recursive: true });
+}
+function accountFile(username) {
+  return path.join(ACCOUNTS_DIR, username.replace(/[^A-Za-z0-9_\-\u4e00-\u9fa5]/g, '_') + '.json');
+}
+function readJson(file, fallback) {
+  try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch (e) { return fallback; }
+}
+function writeJson(file, obj) {
+  const tmp = file + '.tmp';
+  fs.writeFileSync(tmp, JSON.stringify(obj));
+  fs.renameSync(tmp, file);
+}
+function hashPassword(password, salt) {
+  return crypto.scryptSync(String(password), salt, 64).toString('hex');
+}
+
+// 会话: token -> { username, createdAt }，进程内缓存 + 落盘
+let sessions = readJson(SESSIONS_FILE, {});
+function saveSessions() { writeJson(SESSIONS_FILE, sessions); }
+function createSession(res, username) {
+  const token = crypto.randomBytes(32).toString('hex');
+  sessions[token] = { username: username, createdAt: Date.now() };
+  saveSessions();
+  res.setHeader('Set-Cookie',
+    'huanyu_session=' + token + '; Path=/; HttpOnly; SameSite=Lax; Max-Age=' + (365 * 24 * 3600));
+}
+function clearSession(req, res) {
+  const token = parseCookies(req).huanyu_session;
+  if (token && sessions[token]) { delete sessions[token]; saveSessions(); }
+  res.setHeader('Set-Cookie', 'huanyu_session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0');
+}
+function parseCookies(req) {
+  const out = {};
+  (req.headers.cookie || '').split(';').forEach((p) => {
+    const i = p.indexOf('=');
+    if (i > 0) out[p.slice(0, i).trim()] = decodeURIComponent(p.slice(i + 1).trim());
+  });
+  return out;
+}
+function currentUser(req) {
+  const token = parseCookies(req).huanyu_session;
+  const s = token && sessions[token];
+  return s ? s.username : null;
+}
+function readBody(req, limit) {
+  return new Promise((resolve, reject) => {
+    let body = '';
+    req.on('data', (c) => {
+      body += c;
+      if (body.length > limit) { req.destroy(); reject(new Error('payload too large')); }
+    });
+    req.on('end', () => resolve(body));
+    req.on('error', reject);
+  });
+}
+function json(res, code, obj) {
+  res.writeHead(code, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
+  res.end(JSON.stringify(obj));
+}
+
+async function handleCloudApi(req, res, pathname) {
+  ensureDataDirs();
+  try {
+    if (pathname === '/api/auth/register' && req.method === 'POST') {
+      const j = JSON.parse((await readBody(req, 4096)) || '{}');
+      const username = String(j.username || '').trim();
+      const password = String(j.password || '');
+      if (!/^[A-Za-z0-9_\-\u4e00-\u9fa5]{2,24}$/.test(username)) return json(res, 400, { error: '用户名需 2-24 位（中文、字母、数字、_ -）' });
+      if (password.length < 6 || password.length > 128) return json(res, 400, { error: '密码需 6-128 位' });
+      if (fs.existsSync(accountFile(username))) return json(res, 409, { error: '用户名已存在' });
+      const salt = crypto.randomBytes(16).toString('hex');
+      writeJson(accountFile(username), {
+        username: username, salt: salt, hash: hashPassword(password, salt),
+        createdAt: Date.now(), updatedAt: 0, state: null
+      });
+      createSession(res, username);
+      return json(res, 200, { ok: true, username: username });
+    }
+
+    if (pathname === '/api/auth/login' && req.method === 'POST') {
+      const j = JSON.parse((await readBody(req, 4096)) || '{}');
+      const username = String(j.username || '').trim();
+      const password = String(j.password || '');
+      const acc = readJson(accountFile(username), null);
+      if (!acc) return json(res, 401, { error: '用户名或密码错误' });
+      const hash = Buffer.from(hashPassword(password, acc.salt), 'hex');
+      const ok = hash.length === acc.hash.length && crypto.timingSafeEqual(hash, Buffer.from(acc.hash, 'hex'));
+      if (!ok) return json(res, 401, { error: '用户名或密码错误' });
+      createSession(res, username);
+      return json(res, 200, { ok: true, username: username });
+    }
+
+    if (pathname === '/api/auth/logout' && req.method === 'POST') {
+      clearSession(req, res);
+      return json(res, 200, { ok: true });
+    }
+
+    if (pathname === '/api/auth/me' && req.method === 'GET') {
+      const user = currentUser(req);
+      if (!user) return json(res, 401, { error: '未登录' });
+      return json(res, 200, { ok: true, username: user });
+    }
+
+    // 以下需要登录
+    const user = currentUser(req);
+    if (!user) return json(res, 401, { error: '未登录' });
+    const accFile = accountFile(user);
+    const acc = readJson(accFile, null);
+    if (!acc) return json(res, 401, { error: '账号不存在，请重新登录' });
+
+    if (pathname === '/api/state' && req.method === 'GET') {
+      return json(res, 200, { ok: true, state: acc.state, updatedAt: acc.updatedAt || 0 });
+    }
+
+    if (pathname === '/api/state' && req.method === 'PUT') {
+      const j = JSON.parse((await readBody(req, STATE_MAX)) || '{}');
+      const st = j.state;
+      if (!st || typeof st !== 'object' || !Array.isArray(st.conversations)) {
+        return json(res, 400, { error: '存档格式不正确' });
+      }
+      acc.state = st;
+      acc.updatedAt = Date.now();
+      writeJson(accFile, acc);
+      return json(res, 200, { ok: true, updatedAt: acc.updatedAt });
+    }
+
+    return json(res, 404, { error: 'not found' });
+  } catch (e) {
+    return json(res, 500, { error: '服务器内部错误: ' + e.message });
+  }
+}
+
 const server = http.createServer((req, res) => {
   const u = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
 
@@ -195,6 +340,10 @@ const server = http.createServer((req, res) => {
   }
 
   if (u.pathname === '/api/mock/chat/completions') return handleMock(req, res);
+
+  if (u.pathname.startsWith('/api/auth/') || u.pathname === '/api/state') {
+    return handleCloudApi(req, res, u.pathname);
+  }
 
   serveStatic(req, res, u.pathname);
 });

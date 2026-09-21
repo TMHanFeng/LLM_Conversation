@@ -3,7 +3,7 @@
   'use strict';
 
   var KEY = 'huanyu.v1';
-  var APP_VERSION = 'v1.3.1';
+  var APP_VERSION = 'v1.4';
 
   function uid() {
     return Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
@@ -376,7 +376,116 @@
     saveTimer = setTimeout(function () {
       try { localStorage.setItem(KEY, JSON.stringify(state)); }
       catch (e) { console.error('保存失败', e); }
+      scheduleCloudPush();
     }, 200);
+  }
+
+  /* ---------------- 云端同步（账号 · Cookie 会话） ----------------
+   * 登录后自动双向同步：本地改动防抖推送；启动/登录时拉取并按
+   * 「实体为单位、updatedAt 新者胜」合并。连接类设置（API 地址/Key 等）保留在各设备本地。
+   */
+  var CLOUD_KEY = 'huanyu.cloud';
+  var cloud = (function () {
+    try { return Object.assign({ user: null, lastSync: 0 }, JSON.parse(localStorage.getItem(CLOUD_KEY) || '{}')); }
+    catch (e) { return { user: null, lastSync: 0 }; }
+  })();
+  var cloudPushTimer = null;
+  var cloudBusy = false; // 拉取合并期间暂停自动推送，防止拉取→保存→再推送的回环
+
+  function cloudSaveLocal() {
+    try { localStorage.setItem(CLOUD_KEY, JSON.stringify(cloud)); } catch (e) { /* ignore */ }
+  }
+
+  function cloudApi(pathname, opts) {
+    opts = opts || {};
+    opts.credentials = 'same-origin';
+    opts.headers = Object.assign({ 'Content-Type': 'application/json' }, opts.headers || {});
+    return fetch(pathname, opts).then(function (r) {
+      return r.json().catch(function () { return {}; }).then(function (d) {
+        if (!r.ok) { var err = new Error(d.error || ('HTTP ' + r.status)); err.status = r.status; throw err; }
+        return d;
+      });
+    });
+  }
+
+  function mergeCloudState(remote) {
+    var added = 0, updated = 0;
+    if (!remote || typeof remote !== 'object') return { added: added, updated: updated };
+    ['characters', 'worlds', 'skills', 'conversations'].forEach(function (key) {
+      if (!Array.isArray(remote[key])) return;
+      state[key] = state[key] || [];
+      remote[key].forEach(function (r) {
+        if (!r || !r.id) return;
+        var i = state[key].findIndex(function (x) { return x.id === r.id; });
+        if (i < 0) { state[key].push(r); added++; }
+        else if ((r.updatedAt || 0) > (state[key][i].updatedAt || 0)) { state[key][i] = r; updated++; }
+      });
+    });
+    if (remote.settings && typeof remote.settings === 'object') {
+      var deviceLocal = { apiMode: 1, baseUrl: 1, apiKey: 1, model: 1, extraBody: 1, useProxy: 1 };
+      state.settings = state.settings || {};
+      Object.keys(remote.settings).forEach(function (k) {
+        if (!deviceLocal[k]) state.settings[k] = remote.settings[k];
+      });
+    }
+    return { added: added, updated: updated };
+  }
+
+  function cloudPull() {
+    if (!cloud.user) return Promise.reject(new Error('未登录'));
+    cloudBusy = true;
+    return cloudApi('/api/state').then(function (d) {
+      var r = d.state ? mergeCloudState(d.state) : { added: 0, updated: 0 };
+      if (r.added || r.updated) persist();
+      cloud.lastSync = Date.now();
+      cloudSaveLocal();
+      cloudBusy = false;
+      return r;
+    }).catch(function (e) { cloudBusy = false; throw e; });
+  }
+
+  function cloudPush() {
+    if (!cloud.user) return Promise.reject(new Error('未登录'));
+    return cloudApi('/api/state', { method: 'PUT', body: JSON.stringify({ state: state }) })
+      .then(function () { cloud.lastSync = Date.now(); cloudSaveLocal(); });
+  }
+
+  function scheduleCloudPush() {
+    if (!cloud.user || cloudBusy) return;
+    clearTimeout(cloudPushTimer);
+    cloudPushTimer = setTimeout(function () { cloudPush().catch(function () { /* 离线时静默，下次改动再推 */ }); }, 2500);
+  }
+
+  function cloudInit() {
+    return cloudApi('/api/auth/me').then(function (d) {
+      cloud.user = d.username;
+      cloudSaveLocal();
+      return cloudPull();
+    }).then(function (r) {
+      return cloudPush().then(function () { return r; }).catch(function () { return r; });
+    }).catch(function (e) {
+      if (e.status === 401) { cloud.user = null; cloudSaveLocal(); } // 会话失效
+      return { added: 0, updated: 0 };
+    });
+  }
+  function cloudLogin(u, p) {
+    return cloudApi('/api/auth/login', { method: 'POST', body: JSON.stringify({ username: u, password: p }) })
+      .then(function (d) { cloud.user = d.username; cloudSaveLocal(); return cloudPull(); })
+      .then(function (r) {
+        // 登录即全量上云: 保证本机已有数据（含刚合并的结果）保存到服务器
+        return cloudPush().then(function () { return r; }).catch(function () { return r; });
+      });
+  }
+  function cloudRegister(u, p) {
+    return cloudApi('/api/auth/register', { method: 'POST', body: JSON.stringify({ username: u, password: p }) })
+      .then(function (d) { cloud.user = d.username; cloudSaveLocal(); return cloudPull(); })
+      .then(function (r) {
+        return cloudPush().then(function () { return r; }).catch(function () { return r; });
+      });
+  }
+  function cloudLogout() {
+    return cloudApi('/api/auth/logout', { method: 'POST' }).catch(function () { /* ignore */ })
+      .then(function () { cloud.user = null; cloud.lastSync = 0; cloudSaveLocal(); });
   }
 
   /* ---------------- 查询辅助 ---------------- */
@@ -608,6 +717,12 @@
     createConv: createConv, createWorldConv: createWorldConv, createWorldCharConv: createWorldCharConv,
     branchWorldConv: branchWorldConv, deleteConv: deleteConv,
     buildSystemPrompt: buildSystemPrompt, buildWorldSystemPrompt: buildWorldSystemPrompt,
-    buildWorldCharSystemPrompt: buildWorldCharSystemPrompt, buildContext: buildContext
+    buildWorldCharSystemPrompt: buildWorldCharSystemPrompt, buildContext: buildContext,
+    cloud: {
+      get user() { return cloud.user; },
+      get lastSync() { return cloud.lastSync; },
+      init: cloudInit, login: cloudLogin, register: cloudRegister, logout: cloudLogout,
+      pull: cloudPull, push: cloudPush
+    }
   };
 })();
