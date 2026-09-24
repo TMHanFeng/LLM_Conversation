@@ -5,16 +5,14 @@
   function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
 
   /** 计算请求 URL（支持自定义代理防 CORS） */
-  function buildUrl(settings) {
+  function upstreamUrl(settings) {
     var base = (settings.baseUrl || '').trim().replace(/\/+$/, '');
-    var url;
-    if (/\/chat\/completions$/.test(base)) {
-      url = base;
-    } else if (/\/v\d+(beta)?$/.test(base) || /\/api$/.test(base) || /\/openai$/.test(base)) {
-      url = base + '/chat/completions';
-    } else {
-      url = base + '/v1/chat/completions';
-    }
+    if (/\/chat\/completions$/.test(base)) return base;
+    if (/\/v\d+(beta)?$/.test(base) || /\/api$/.test(base) || /\/openai$/.test(base)) return base + '/chat/completions';
+    return base + '/v1/chat/completions';
+  }
+  function buildUrl(settings) {
+    var url = upstreamUrl(settings);
     if (settings.useProxy && location.protocol !== 'file:') {
       return location.origin + '/api/proxy?url=' + encodeURIComponent(url);
     }
@@ -136,6 +134,130 @@
       throw new Error('接口未返回内容，请检查模型名称与接口地址');
     }
     return result;
+  }
+
+  /* ---------------- 服务器后台任务模式 ----------------
+   * 页面由 server.js 托管时（http/https），LLM 请求交给服务器后台执行：
+   * 服务器向上游发流式请求、逐字接收并落盘；浏览器只轮询增量。
+   * 切走标签页 / 挂起 / 关闭浏览器都不影响生成，回来按 taskId 续读即得完整结果。
+   * file:// 场景（页面不来自服务器）自动回退为浏览器直连的旧路径。
+   */
+  var TASK_BASE = (location.protocol === 'http:' || location.protocol === 'https:') ? location.origin : null;
+  var TASK_POLL_MS = 600;
+
+  /** 创建后台生成任务，立即返回 taskId */
+  async function createTask(opts) {
+    var s = opts.settings;
+    var demo = s.apiMode === 'demo';
+    var url = demo ? (TASK_BASE + '/api/mock/chat/completions') : upstreamUrl(s);
+    var res = await fetch(TASK_BASE + '/api/task', {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        url: url,
+        apiKey: demo ? '' : (s.apiKey || ''),
+        body: buildBody(s, opts.messages, true)
+      }),
+      signal: opts.signal
+    });
+    if (!res.ok) {
+      var t = '';
+      try { t = (await res.json()).error || ''; } catch (e) { /* ignore */ }
+      throw new Error('创建生成任务失败' + (t ? ': ' + t : ' (HTTP ' + res.status + ')'));
+    }
+    var d = await res.json();
+    if (!d.taskId) throw new Error('创建生成任务失败');
+    return d.taskId;
+  }
+
+  /** 可被「页面回到前台」打断的等待：后台标签定时器被限流时，切回来立即补一次轮询 */
+  function waitPollDelay(ms) {
+    return new Promise(function (resolve) {
+      var t = setTimeout(done, ms);
+      function onVis() { if (!document.hidden) done(); }
+      function done() {
+        clearTimeout(t);
+        document.removeEventListener('visibilitychange', onVis);
+        resolve();
+      }
+      document.addEventListener('visibilitychange', onVis);
+    });
+  }
+
+  /**
+   * 轮询服务器任务直至完成，期间把增量喂给 onDelta/onReasoning。
+   * 用户中止时通知服务器停止生成并等它封盘（保留已生成部分）。
+   * @returns {Promise<{content:string, reasoning:string, stopped:boolean}>}
+   */
+  async function pollTask(taskId, opts) {
+    var lastContent = '', lastReason = '';
+    var stopAsked = false;
+    function emit(d) {
+      if (d.reasoning && d.reasoning.length > lastReason.length) {
+        if (opts.onReasoning) opts.onReasoning(d.reasoning.slice(lastReason.length));
+        lastReason = d.reasoning;
+      }
+      if (d.content && d.content.length > lastContent.length) {
+        if (opts.onDelta) opts.onDelta(d.content.slice(lastContent.length));
+        lastContent = d.content;
+      }
+    }
+    function askStop() {
+      if (stopAsked) return;
+      stopAsked = true;
+      fetch(TASK_BASE + '/api/task/' + taskId + '/stop', { method: 'POST', credentials: 'same-origin' })
+        .catch(function () { /* 服务器暂不可达时任务自身也会按空闲超时收尾 */ });
+    }
+    function aborted() { return opts.signal && opts.signal.aborted; }
+    if (opts.signal) {
+      if (aborted()) askStop();
+      else opts.signal.addEventListener('abort', askStop);
+    }
+    var d = null;
+    var netFails = 0;
+    try {
+      while (true) {
+        try {
+          var r = await fetch(TASK_BASE + '/api/task/' + taskId, { cache: 'no-store', credentials: 'same-origin' });
+          if (r.status === 404) throw new Error('生成任务已失效（可能已被服务器清理）');
+          d = await r.json();
+          netFails = 0;
+        } catch (e) {
+          if (e && e.message && e.message.indexOf('已失效') >= 0) throw e;
+          // 网络抖动/服务器暂不可达：任务仍在服务器后台跑，稍等重试
+          if (++netFails > 60) throw new Error('无法连接服务器，生成状态丢失');
+          await waitPollDelay(1500);
+          continue;
+        }
+        emit(d);
+        if (d.status === 'done' || d.status === 'error') break;
+        await waitPollDelay(aborted() ? 150 : TASK_POLL_MS);
+      }
+    } finally {
+      if (opts.signal) opts.signal.removeEventListener('abort', askStop);
+    }
+    if (d.status === 'error') throw new Error(d.error || '生成失败');
+    return { content: d.content || '', reasoning: d.reasoning || '', stopped: !!d.stopped };
+  }
+
+  /** 任务模式主入口：创建任务 → 轮询直至完成 */
+  async function chatTask(opts) {
+    var taskId = await createTask(opts);
+    if (opts.onTaskId) opts.onTaskId(taskId);
+    return pollTask(taskId, opts);
+  }
+
+  /** 按 taskId 续读一个已有任务（页面重开/换设备后恢复未完成的消息） */
+  function resumeTask(taskId, opts) {
+    if (!TASK_BASE) return Promise.reject(new Error('当前页面不来自幻语服务器，无法恢复生成任务'));
+    return pollTask(taskId, opts || {});
+  }
+
+  /** 统一入口：服务器托管时走后台任务，file:// 回退浏览器直连 */
+  async function chat(opts) {
+    if (TASK_BASE) return chatTask(opts);
+    return chatStream(opts);
   }
 
   /** 连接测试（非流式小请求） */
@@ -277,5 +399,5 @@
     return { content: reply, reasoning: '' };
   }
 
-  window.API = { chatStream: chatStream, testConnection: testConnection, buildUrl: buildUrl };
+  window.API = { chat: chat, chatStream: chatStream, resumeTask: resumeTask, testConnection: testConnection, buildUrl: buildUrl };
 })();

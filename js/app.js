@@ -1017,6 +1017,9 @@
   /** 从某条消息处截断并重新生成（m 为最后保留的用户消息，或待重写的助手消息） */
   function regenFrom(conv, m) {
     if (currentGen) { UI.toast('正在生成中，请稍候', 'err'); return; }
+    if (conv.messages.some(function (x) { return x.pending && x.id !== m.id; })) {
+      UI.toast('对方正在回复，请稍候', 'err'); return;
+    }
     var idx = conv.messages.findIndex(function (x) { return x.id === m.id; });
     if (idx < 0) return;
     if (m.role === 'assistant') {
@@ -1070,6 +1073,10 @@
     if (!text) return;
     var conv = Store.activeConv();
     if (!conv) { UI.toast('请先选择一个角色', 'err'); return; }
+    if (conv.messages.some(function (x) { return x.pending; })) {
+      UI.toast('对方仍在回复，请稍候', 'err');
+      return;
+    }
 
     inputBox.value = '';
     autoGrow();
@@ -1086,7 +1093,52 @@
     generate(conv);
   }
 
+  /** 更新当前对话里某条消息的节点：light=true 走增量（避免头像重载闪屏），否则全量重建 */
+  function refreshMsgNode(conv, m, light) {
+    var node = msgInner.querySelector('[data-mid="' + m.id + '"]');
+    if (!node) return;
+    var stick = nearBottom();
+    if (light) {
+      // 思考过程正文就地更新
+      var rb = node.querySelector('.reasoning .r-body');
+      if (rb && m.reasoning && rb.textContent !== m.reasoning) rb.textContent = m.reasoning;
+      if (conv.type === 'world') {
+        if (!updateWorldSegments(node, conv, m)) return refreshMsgNode(conv, m, false);
+      } else {
+        var disp = String(m.content || '').split('⟦STATE⟧')[0];
+        var bub = node.querySelector('.bubble.md');
+        if (bub) {
+          bub.innerHTML = MD.render(disp) + '<span class="caret"></span>';
+        } else if (disp) {
+          return refreshMsgNode(conv, m, false); // 首个可见内容: 从打字气泡切换为正文
+        }
+      }
+    } else {
+      node.replaceWith(buildMsgEl(conv, m));
+    }
+    if (stick) scrollToBottom();
+  }
+
+  /** 生成收尾：应用世界状态块、持久化并刷新界面（在线生成与断线恢复共用） */
+  function finalizeGenMessage(conv, m) {
+    m.pending = false;
+    // 世界冒险/私谈: 解析并应用状态块(场景/事件/状态/新角色/记忆入图谱)
+    if ((conv.type === 'world' || isWorldCharConv(conv)) && !m.error) {
+      applyWorldState(conv, m);
+    }
+    conv.updatedAt = Date.now();
+    Store.persist();
+    refreshMsgNode(conv, m, false);
+    updateHeader();
+    updateComposerState();
+    renderConvList('');
+  }
+
   async function generate(conv) {
+    if (conv.messages.some(function (x) { return x.pending; })) {
+      UI.toast('对方正在回复，请稍候', 'err');
+      return;
+    }
     var m = { id: uid(), role: 'assistant', content: '', reasoning: '', ts: Date.now(), pending: true };
     conv.messages.push(m);
     appendMsgEl(conv, m);
@@ -1099,48 +1151,19 @@
     var thinkStart = Date.now();
     var rafId = 0;
     var hasFirstToken = false;
-
-    // 全量重建（仅在首 token / 收尾时使用）
-    function updateDom() {
-      rafId = 0;
-      var node = msgInner.querySelector('[data-mid="' + m.id + '"]');
-      if (!node) return;
-      var stick = nearBottom();
-      var fresh = buildMsgEl(conv, m);
-      node.replaceWith(fresh);
-      if (stick) scrollToBottom();
-    }
-    // 流式期间: 只增量更新内容, 不重建整条消息(避免头像图片重载导致闪屏)
-    function updateDomLight() {
-      rafId = 0;
-      var node = msgInner.querySelector('[data-mid="' + m.id + '"]');
-      if (!node) return;
-      var stick = nearBottom();
-      // 思考过程正文就地更新
-      var rb = node.querySelector('.reasoning .r-body');
-      if (rb && m.reasoning && rb.textContent !== m.reasoning) rb.textContent = m.reasoning;
-
-      if (conv.type === 'world') {
-        if (!updateWorldSegments(node, conv, m)) return updateDom();
-      } else {
-        var disp = String(m.content || '').split('⟦STATE⟧')[0];
-        var bub = node.querySelector('.bubble.md');
-        if (bub) {
-          bub.innerHTML = MD.render(disp) + '<span class="caret"></span>';
-        } else if (disp) {
-          return updateDom(); // 首个可见内容: 从打字气泡切换为正文
-        }
-      }
-      if (stick) scrollToBottom();
-    }
     function schedule() {
-      if (!rafId) rafId = requestAnimationFrame(hasFirstToken ? updateDomLight : updateDom);
+      if (rafId) return;
+      rafId = requestAnimationFrame(function () {
+        rafId = 0;
+        refreshMsgNode(conv, m, hasFirstToken);
+      });
     }
 
     try {
       var wObj = conv.type === 'world' ? convWorld(conv) : null;
       var wc = isWorldCharConv(conv) ? convWorldChar(conv) : null;
-      await API.chatStream({
+      // 服务器后台任务模式: 生成与浏览器连接解耦, 切走/关闭页面都不中断
+      var r = await API.chat({
         messages: Store.buildContext(conv),
         settings: state.settings,
         charName: (convChar(conv) || wc || {}).name || '对方',
@@ -1151,16 +1174,20 @@
           name: wObj.name,
           presentName: (conv.present && conv.present[0]) || (wObj.characters[0] && wObj.characters[0].name) || '店主'
         } : null,
+        onTaskId: function (tid) {
+          m.taskId = tid; // 记在消息上, 浏览器关掉后仍可按 taskId 恢复
+          Store.persist();
+        },
         onReasoning: function (t) {
           m.reasoning += t;
-          if (!hasFirstToken) schedule();
+          schedule();
         },
         onDelta: function (t) {
           m.content += t;
           if (!hasFirstToken) {
             hasFirstToken = true;
             m.thinkMs = Date.now() - thinkStart;
-            updateDom(); // 首token全量重建(落定思考用时标签), 之后走增量
+            refreshMsgNode(conv, m, false); // 首token全量重建(落定思考用时标签), 之后走增量
           } else {
             schedule();
           }
@@ -1168,6 +1195,10 @@
       });
       m.pending = false;
       if (!m.content) { m.content = '（对方沉默了片刻…）'; }
+      if (r && r.stopped) {
+        m.stopped = true;
+        m.content += '\n\n（已停止生成）';
+      }
     } catch (e) {
       m.pending = false;
       if (e && (e.name === 'AbortError' || ctrl.signal.aborted)) {
@@ -1180,25 +1211,62 @@
     }
 
     if (rafId) cancelAnimationFrame(rafId);
-    m.pending = false;
-    // 世界冒险/私谈: 解析并应用状态块(场景/事件/状态/新角色/记忆入图谱)
-    var worldChanged = false;
-    if ((conv.type === 'world' || isWorldCharConv(conv)) && !m.error) {
-      worldChanged = applyWorldState(conv, m);
-    }
-    currentGen = null;
-    conv.updatedAt = Date.now();
-    Store.persist();
+    if (currentGen && currentGen.msgId === m.id) currentGen = null;
+    finalizeGenMessage(conv, m);
+  }
 
-    var node = msgInner.querySelector('[data-mid="' + m.id + '"]');
-    if (node) {
-      var stick = nearBottom();
-      node.replaceWith(buildMsgEl(conv, m));
-      if (stick) scrollToBottom();
+  /* ---------------- 断线恢复：重开浏览器/换设备后续读服务器任务 ---------------- */
+
+  /** 把一条带 taskId 的未完成消息重新挂回服务器任务，收尾与在线生成完全一致 */
+  function resumeTask(conv, m) {
+    var hasFirst = !!(m.content || m.reasoning);
+    function touchLive() {
+      if (Store.activeConv() !== conv) return; // 非当前对话只更新数据, 不动界面
+      var light = hasFirst;
+      hasFirst = hasFirst || !!m.content || !!m.reasoning;
+      refreshMsgNode(conv, m, light);
     }
-    updateHeader();
-    updateComposerState();
-    renderConvList('');
+    API.resumeTask(m.taskId, {
+      onReasoning: function (t) { m.reasoning = (m.reasoning || '') + t; touchLive(); },
+      onDelta: function (t) { m.content = (m.content || '') + t; touchLive(); }
+    }).then(function (r) {
+      m.pending = false;
+      if (!m.content) { m.content = '（对方沉默了片刻…）'; }
+      if (r && r.stopped) {
+        m.stopped = true;
+        m.content += '\n\n（已停止生成）';
+      }
+      finalizeGenMessage(conv, m);
+    }).catch(function (e) {
+      m.pending = false;
+      m.error = (e && e.message) || String(e);
+      finalizeGenMessage(conv, m);
+    });
+  }
+
+  /** 启动时扫描所有对话: 带 taskId 的未完成消息重新挂回服务器任务; 旧版残留的就地封存 */
+  function resumePendingTasks() {
+    var dirty = false;
+    state.conversations.forEach(function (conv) {
+      (conv.messages || []).forEach(function (m) {
+        if (!m.pending) return;
+        if (m.taskId) {
+          if (currentGen && currentGen.msgId === m.id) return; // 本次会话正在生成
+          resumeTask(conv, m);
+        } else {
+          m.pending = false; // 旧版浏览器内生成时被中断的消息, 无服务器任务可恢复
+          m.stopped = true;
+          if (!m.content) m.content = '（生成中断）';
+          conv.updatedAt = Date.now();
+          dirty = true;
+        }
+      });
+    });
+    if (dirty) {
+      Store.persist();
+      renderConvList('');
+      if (Store.activeConv()) renderChat();
+    }
   }
 
   /* ---------------- 输入框 ---------------- */
@@ -2183,14 +2251,17 @@
     renderAll();
     if (window.innerWidth > 860) { /* 桌面端抽屉常驻 */ }
     // 云端同步: 恢复 Cookie 登录态并拉取合并（静默, 出错不影响本地使用）
+    var cloudReady = Promise.resolve();
     if (location.protocol === 'http:' || location.protocol === 'https:') {
-      Store.cloud.init().then(function (r) {
+      cloudReady = Store.cloud.init().then(function (r) {
         if (r && (r.added || r.updated)) {
           renderAll();
           UI.toast('已从云端同步：新增 ' + r.added + '，更新 ' + r.updated + ' 项');
         }
-      });
+      }, function () { /* 离线等情况: 只用本地 */ });
     }
+    // 云端合并完成后再恢复未完成的服务器生成任务（重开浏览器/换设备回来，对话继续跑完）
+    cloudReady.then(resumePendingTasks, resumePendingTasks);
   }
   init();
 

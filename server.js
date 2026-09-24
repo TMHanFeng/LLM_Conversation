@@ -11,6 +11,7 @@ const path = require('path');
 const os = require('os');
 const crypto = require('crypto');
 const { URL } = require('url');
+const { StringDecoder } = require('string_decoder');
 
 const PORT = Number(process.env.PORT || 3000);
 const ROOT = __dirname;
@@ -278,8 +279,11 @@ async function handleCloudApi(req, res, pathname) {
       const password = String(j.password || '');
       const acc = readJson(accountFile(username), null);
       if (!acc) return json(res, 401, { error: '用户名或密码错误' });
-      const hash = Buffer.from(hashPassword(password, acc.salt), 'hex');
-      const ok = hash.length === acc.hash.length && crypto.timingSafeEqual(hash, Buffer.from(acc.hash, 'hex'));
+      // 注意: hashPassword 返回 64 字节的 hex 字符串，双方都转成 Buffer 再比长度（此前
+      // 误用 Buffer.length(64) 与字符串 .length(128) 相比，导致任何密码都 401）
+      const calc = Buffer.from(hashPassword(password, acc.salt), 'hex');
+      const stored = Buffer.from(String(acc.hash || ''), 'hex');
+      const ok = calc.length === stored.length && stored.length > 0 && crypto.timingSafeEqual(calc, stored);
       if (!ok) return json(res, 401, { error: '用户名或密码错误' });
       createSession(res, username);
       return json(res, 200, { ok: true, username: username });
@@ -325,6 +329,189 @@ async function handleCloudApi(req, res, pathname) {
   }
 }
 
+/* ================= 服务器端对话任务（后台生成） =================
+ * 消息发出后，LLM 请求完全由服务器执行：向上游发流式请求、逐字接收、节流落盘到
+ * data/tasks/<id>.json（API Key 只留内存，绝不落盘）。浏览器只是轮询读进度，
+ * 随时可切走 / 挂起 / 关闭 / 换设备——回来按消息上的 taskId 续读即可，
+ * 任务早已在服务器跑完并持久保存。
+ *   POST /api/task              { url, apiKey, body } → { taskId } 立即返回
+ *   GET  /api/task/<id>         → { id, status: running|done|error, content, reasoning, error, stopped }
+ *   POST /api/task/<id>/stop    → 停止生成，保留已生成的部分内容
+ */
+const TASKS_DIR = path.join(DATA_DIR, 'tasks');
+const TASK_TTL_MS = 3 * 24 * 3600 * 1000; // 任务文件保留 3 天，超期自动清理
+const TASK_IDLE_TIMEOUT = 300000;         // 上游 5 分钟无数据 → 判定失败
+const TASK_BODY_MAX = 8 * 1024 * 1024;    // 任务请求体上限 8MB
+const liveTasks = new Map(); // id -> task（含 apiKey 与上游请求句柄，仅内存）
+
+function taskPath(id) {
+  return /^[a-f0-9]{32}$/.test(id) ? path.join(TASKS_DIR, id + '.json') : null;
+}
+function taskView(t) {
+  return {
+    id: t.id, status: t.status, content: t.content, reasoning: t.reasoning,
+    error: t.error || null, stopped: !!t.stopped, updatedAt: t.updatedAt
+  };
+}
+function writeTaskFile(t) {
+  const f = taskPath(t.id);
+  if (f) { try { writeJson(f, taskView(t)); } catch (e) { /* 磁盘满等场景不致命 */ } }
+}
+function queueSaveTask(t) {
+  if (t.finished || t.saveTimer) return;
+  t.saveTimer = setTimeout(function () { t.saveTimer = null; writeTaskFile(t); }, 250);
+}
+function finishTask(t, status, errMsg) {
+  if (t.finished) return;
+  if (t.saveTimer) { clearTimeout(t.saveTimer); t.saveTimer = null; }
+  liveTasks.delete(t.id);
+  t.finished = true;
+  t.updatedAt = Date.now();
+  if (errMsg) t.error = String(errMsg).slice(0, 500);
+  if (status !== 'done' && !t.error) t.error = '生成失败';
+  if (status === 'done' && !t.error && !t.stopped && !t.content && !t.reasoning) {
+    t.error = '接口未返回内容，请检查模型名称与接口地址';
+  }
+  t.status = t.error ? 'error' : status;
+  writeTaskFile(t);
+}
+
+/** 解析上游 SSE 单行，逐字累积到任务（含部分网关的非流式 message 兜底） */
+function feedTaskLine(t, line) {
+  if (t.finished || !/^data:/.test(line)) return;
+  const payload = line.slice(5).trim();
+  if (payload === '[DONE]') return finishTask(t, 'done');
+  let obj;
+  try { obj = JSON.parse(payload); } catch (e) { return; }
+  const ch = obj.choices && obj.choices[0];
+  if (!ch) return;
+  const d = ch.delta || {};
+  let contentPiece = d.content || '';
+  let reasonPiece = d.reasoning_content || d.reasoning || '';
+  if (ch.message) {
+    if (ch.message.content) contentPiece = ch.message.content;
+    const r2 = ch.message.reasoning_content || ch.message.reasoning;
+    if (r2) reasonPiece = r2;
+  }
+  if (contentPiece) { t.content += contentPiece; queueSaveTask(t); }
+  if (reasonPiece) { t.reasoning += reasonPiece; queueSaveTask(t); }
+}
+
+/** 由服务器向上游 LLM 发起流式请求（与浏览器无关，独立跑完） */
+function runTaskUpstream(t, url, apiKey, bodyStr) {
+  let u;
+  try { u = new URL(url); } catch (e) { return finishTask(t, 'error', '无效的接口地址'); }
+  if (!/^https?:$/.test(u.protocol)) return finishTask(t, 'error', '仅支持 http/https 接口');
+  const isHttps = u.protocol === 'https:';
+  const mod = isHttps ? https : http;
+  const headers = {
+    'Content-Type': 'application/json',
+    'Accept': 'text/event-stream',
+    'Content-Length': Buffer.byteLength(bodyStr)
+  };
+  if (apiKey) headers['Authorization'] = 'Bearer ' + apiKey;
+  const req = mod.request({
+    protocol: u.protocol, hostname: u.hostname,
+    port: u.port || (isHttps ? 443 : 80),
+    path: u.pathname + u.search, method: 'POST', headers, timeout: TASK_IDLE_TIMEOUT
+  }, (ur) => {
+    const ct = String(ur.headers['content-type'] || '');
+    if ((ur.statusCode || 502) !== 200) {
+      let errBody = '';
+      ur.on('data', (c) => { errBody += c; if (errBody.length > 65536) ur.destroy(); });
+      ur.on('end', () => finishTask(t, 'error', 'HTTP ' + ur.statusCode + (errBody ? ': ' + errBody.slice(0, 300) : '')));
+      ur.on('error', () => finishTask(t, 'error', 'HTTP ' + ur.statusCode));
+      return;
+    }
+    const dec = new StringDecoder('utf8'); // 逐字接收，正确处理跨块的中文多字节字符
+    if (!ct.includes('event-stream')) {
+      // 上游未按流式返回：整体缓冲后按 JSON 解析
+      let raw = '';
+      ur.on('data', (c) => { raw += c; if (raw.length > 32 * 1024 * 1024) ur.destroy(); });
+      ur.on('end', () => {
+        try {
+          const data = JSON.parse(raw);
+          const msg = (data.choices && data.choices[0] && data.choices[0].message) || {};
+          if (msg.content) t.content += msg.content;
+          const r = msg.reasoning_content || msg.reasoning;
+          if (r) t.reasoning += r;
+        } catch (e) { /* 非 JSON 响应按空内容收尾 */ }
+        finishTask(t, 'done');
+      });
+      ur.on('error', (e) => finishTask(t, 'error', e.message));
+      return;
+    }
+    let buf = '';
+    ur.on('data', (chunk) => {
+      t.updatedAt = Date.now();
+      buf += dec.write(chunk);
+      let idx;
+      while ((idx = buf.indexOf('\n')) >= 0) {
+        const line = buf.slice(0, idx).replace(/\r$/, '');
+        buf = buf.slice(idx + 1);
+        feedTaskLine(t, line);
+      }
+      if (t.finished) { try { ur.destroy(); } catch (e) { /* ignore */ } }
+    });
+    ur.on('end', () => finishTask(t, 'done'));
+    ur.on('error', (e) => finishTask(t, 'error', '上游连接中断: ' + e.message));
+  });
+  req.on('timeout', () => req.destroy(new Error('上游长时间无响应')));
+  req.on('error', (e) => finishTask(t, 'error', '请求失败: ' + e.message));
+  t.req = req;
+  req.end(bodyStr);
+}
+
+function abortTask(t) {
+  if (t.finished) return;
+  t.stopped = true;
+  try { if (t.req) t.req.destroy(); } catch (e) { /* ignore */ }
+  finishTask(t, 'done'); // 保留已生成的部分
+}
+
+/** 启动时清理：过期任务删除；上次服务器重启时仍在跑的任务 → 标记中断并保留部分内容 */
+function sweepTasks(markInterrupted) {
+  let names = [];
+  try { names = fs.readdirSync(TASKS_DIR); } catch (e) { return; }
+  const now = Date.now();
+  names.forEach((n) => {
+    const f = path.join(TASKS_DIR, n);
+    const t = readJson(f, null);
+    const valid = t && /^[a-f0-9]{32}$/.test(String(t.id)) && n === t.id + '.json';
+    const stale = !valid || (now - Math.max(t.updatedAt || 0, t.createdAt || 0) > TASK_TTL_MS);
+    if (stale) { try { fs.unlinkSync(f); } catch (e) { /* ignore */ } return; }
+    if (markInterrupted && t.status === 'running') {
+      t.status = 'error';
+      t.error = '服务器重启，生成中断';
+      t.updatedAt = now;
+      writeJson(f, t);
+    }
+  });
+}
+
+async function handleTaskCreate(req, res) {
+  ensureDataDirs();
+  fs.mkdirSync(TASKS_DIR, { recursive: true });
+  const j = JSON.parse((await readBody(req, TASK_BODY_MAX)) || '{}');
+  const url = String(j.url || '');
+  const apiKey = String(j.apiKey || '');
+  const body = j.body;
+  if (!/^https?:\/\//i.test(url)) return json(res, 400, { error: '无效的接口地址' });
+  if (!body || typeof body !== 'object' || !Array.isArray(body.messages)) {
+    return json(res, 400, { error: 'body.messages 不合法' });
+  }
+  const id = crypto.randomBytes(16).toString('hex');
+  const t = {
+    id: id, status: 'running', content: '', reasoning: '',
+    error: null, stopped: false, updatedAt: Date.now(),
+    apiKey: apiKey, req: null, saveTimer: null, finished: false
+  };
+  liveTasks.set(id, t);
+  writeTaskFile(t);
+  runTaskUpstream(t, url, apiKey, JSON.stringify(body));
+  return json(res, 200, { taskId: id });
+}
+
 const server = http.createServer((req, res) => {
   const u = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
 
@@ -341,12 +528,37 @@ const server = http.createServer((req, res) => {
 
   if (u.pathname === '/api/mock/chat/completions') return handleMock(req, res);
 
+  if (u.pathname === '/api/task' && req.method === 'POST') {
+    return handleTaskCreate(req, res).catch((e) => {
+      if (!res.headersSent) return json(res, 500, { error: '创建任务失败: ' + e.message });
+      try { res.end(); } catch (e2) { /* ignore */ }
+    });
+  }
+  let tm;
+  if (req.method === 'GET' && (tm = u.pathname.match(/^\/api\/task\/([a-f0-9]{32})$/))) {
+    const f = taskPath(tm[1]);
+    const t = f && fs.existsSync(f) ? readJson(f, null) : null;
+    if (!t) return json(res, 404, { error: '任务不存在或已清理' });
+    return json(res, 200, t);
+  }
+  if (req.method === 'POST' && (tm = u.pathname.match(/^\/api\/task\/([a-f0-9]{32})\/stop$/))) {
+    const t = liveTasks.get(tm[1]);
+    if (t) abortTask(t);
+    return json(res, 200, { ok: true });
+  }
+
   if (u.pathname.startsWith('/api/auth/') || u.pathname === '/api/state') {
     return handleCloudApi(req, res, u.pathname);
   }
 
   serveStatic(req, res, u.pathname);
 });
+
+// 启动即恢复任务区：清理过期文件；上次进程退出时仍在跑的任务 → 标记中断并保留部分内容
+ensureDataDirs();
+fs.mkdirSync(TASKS_DIR, { recursive: true });
+sweepTasks(true);
+setInterval(() => sweepTasks(false), 3600 * 1000).unref();
 
 server.listen(PORT, () => {
   const nets = os.networkInterfaces();
