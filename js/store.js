@@ -3,7 +3,7 @@
   'use strict';
 
   var KEY = 'huanyu.v1';
-  var APP_VERSION = 'v1.5';
+  var APP_VERSION = 'v1.6';
 
   function uid() {
     return Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
@@ -300,6 +300,8 @@
       baseUrl: 'https://api.deepseek.com/v1',
       apiKey: '',
       model: 'deepseek-chat',
+      apiList: [],                // 已保存的 API 配置 [{id,name,baseUrl,apiKey,model,useProxy}]
+      activeApiId: '',            // 当前选中的配置 id；空 = 未选择（自由输入）
       temperature: 0.8,
       maxTokens: 2048,
       thinking: 'off',            // off | low | medium | high
@@ -309,6 +311,58 @@
       theme: 'auto',              // auto | light | dark
       historyLimit: 40
     };
+  }
+
+  /** 从 URL 提取主机名（用于给 API 配置起默认名） */
+  function apiHostName(u) {
+    try { return new URL(u).hostname; } catch (e) { return ''; }
+  }
+
+  /** API 配置列表的规范化与旧数据迁移：老版本只有单份 baseUrl/apiKey/model，自动收编为第一条配置 */
+  function migrateApiList(st) {
+    if (!Array.isArray(st.apiList)) st.apiList = [];
+    st.apiList = st.apiList.filter(function (a) { return a && a.id; }).map(function (a) {
+      return {
+        id: String(a.id), name: String(a.name || apiHostName(a.baseUrl) || '自定义 API'),
+        baseUrl: String(a.baseUrl || ''), apiKey: String(a.apiKey || ''),
+        model: String(a.model || ''), useProxy: !!a.useProxy
+      };
+    });
+    if (!st.apiList.length && (st.baseUrl || st.apiKey)) {
+      var entry = {
+        id: uid(), name: apiHostName(st.baseUrl) || '自定义 API',
+        baseUrl: st.baseUrl || '', apiKey: st.apiKey || '',
+        model: st.model || '', useProxy: !!st.useProxy
+      };
+      st.apiList.push(entry);
+      st.activeApiId = entry.id;
+    }
+    if (st.activeApiId && !st.apiList.some(function (a) { return a.id === st.activeApiId; })) {
+      st.activeApiId = '';
+    }
+  }
+
+  /** 同名技能视为同一技能：去重（多设备各自种子的内置技能 id 不同，云端合并后会出现重复）。
+   *  保留 updatedAt 较新的一方，被丢弃副本在对话里的附加引用统一重映射到保留副本。 */
+  function dedupeSkills() {
+    var byName = {};
+    var remap = {};
+    (state.skills || []).forEach(function (sk) {
+      if (!sk || !sk.name) return;
+      var prev = byName[sk.name];
+      if (!prev) { byName[sk.name] = sk; return; }
+      var keep = (sk.updatedAt || 0) > (prev.updatedAt || 0) ? sk : prev;
+      var drop = keep === sk ? prev : sk;
+      remap[drop.id] = keep.id;
+      byName[sk.name] = keep;
+    });
+    if (!Object.keys(remap).length) return;
+    state.skills = state.skills.filter(function (sk) { return !remap[sk.id]; });
+    (state.conversations || []).forEach(function (c) {
+      if (!Array.isArray(c.skills)) return;
+      var mapped = c.skills.map(function (id) { return remap[id] || id; });
+      c.skills = mapped.filter(function (id, i) { return mapped.indexOf(id) === i; });
+    });
   }
 
   /* ---------------- 状态 ---------------- */
@@ -353,6 +407,8 @@
             }
           });
         });
+        migrateApiList(state.settings);
+        dedupeSkills();
         return state;
       }
     } catch (e) { /* 损坏则重置 */ }
@@ -367,6 +423,7 @@
       skillLibVer: BUILTIN_SKILLS_VERSION
     };
     state.conversations.forEach(function (c) { c.type = c.type || 'solo'; });
+    migrateApiList(state.settings);
     persist();
     return state;
   }
@@ -421,8 +478,9 @@
         else if ((r.updatedAt || 0) > (state[key][i].updatedAt || 0)) { state[key][i] = r; updated++; }
       });
     });
+    dedupeSkills();
     if (remote.settings && typeof remote.settings === 'object') {
-      var deviceLocal = { apiMode: 1, baseUrl: 1, apiKey: 1, model: 1, extraBody: 1, useProxy: 1 };
+      var deviceLocal = { apiMode: 1, baseUrl: 1, apiKey: 1, model: 1, extraBody: 1, useProxy: 1, apiList: 1, activeApiId: 1 };
       state.settings = state.settings || {};
       Object.keys(remote.settings).forEach(function (k) {
         if (!deviceLocal[k]) state.settings[k] = remote.settings[k];
@@ -713,6 +771,7 @@
     get state() { return state; },
     getChar: getChar, getConv: getConv, activeConv: activeConv,
     getWorld: getWorld, isWorldCharConv: isWorldCharConv,
+    apiHostName: apiHostName,
     addKnowledge: addKnowledge, knowledgeForChar: knowledgeForChar, effectiveKnowledge: effectiveKnowledge,
     createConv: createConv, createWorldConv: createWorldConv, createWorldCharConv: createWorldCharConv,
     branchWorldConv: branchWorldConv, deleteConv: deleteConv,

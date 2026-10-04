@@ -1062,7 +1062,8 @@
       hint.textContent = '演示模式 · 在「后台设置」接入你自己的模型 API';
     } else {
       var th = { off: '', low: ' · 思考:低', medium: ' · 思考:中', high: ' · 思考:高' }[st.thinking] || '';
-      hint.textContent = (st.model || '未设置模型') + th;
+      var act = (st.apiList || []).find(function (a) { return a.id === st.activeApiId; });
+      hint.textContent = (act && act.name ? act.name + ' · ' : '') + (st.model || '未设置模型') + th;
     }
   }
 
@@ -1395,6 +1396,7 @@
         g.items.forEach(function (sk) {
           var row = UI.switchRow(sk.name, sk.desc || sk.content.slice(0, 46) + (sk.content.length > 46 ? '…' : ''), isShown(sk), function (v) {
             sk.shown = v;
+            sk.updatedAt = Date.now();
             Store.persist();
             renderDrawer();
             renderSkillChips();
@@ -1406,12 +1408,12 @@
     }
     search.addEventListener('input', function () { renderList(search.value.trim()); });
     allOn.addEventListener('click', function () {
-      state.skills.forEach(function (sk) { sk.shown = true; });
+      state.skills.forEach(function (sk) { sk.shown = true; sk.updatedAt = Date.now(); });
       Store.persist(); renderDrawer(); renderSkillChips(); updateFoot(); renderList(search.value.trim());
       UI.toast('全部技能已上架');
     });
     allOff.addEventListener('click', function () {
-      state.skills.forEach(function (sk) { sk.shown = false; });
+      state.skills.forEach(function (sk) { sk.shown = false; sk.updatedAt = Date.now(); });
       Store.persist(); renderDrawer(); renderSkillChips(); updateFoot(); renderList(search.value.trim());
       UI.toast('全部技能已下架（对话中已附加的不受影响）');
     });
@@ -1970,6 +1972,26 @@
 
   /* ---------------- 全局设置（后台） ---------------- */
   /* ---------------- 账号与云端同步（设置面板区块） ---------------- */
+  /** 询问服务端版本（/api/health）；不可达或旧进程无此接口时返回 null */
+  function serverVerInfo() {
+    return fetch('/api/health').then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (d) { return d && d.version ? String(d.version) : null; })
+      .catch(function () { return null; });
+  }
+  function verOlder(a, b) {
+    var A = String(a || '').replace(/^v/, '').split('.'), B = String(b || '').replace(/^v/, '').split('.');
+    for (var i = 0; i < Math.max(A.length, B.length); i++) {
+      var x = Number(A[i]) || 0, y = Number(B[i]) || 0;
+      if (x !== y) return x < y;
+    }
+    return false;
+  }
+  function describeServerVer(sv) {
+    if (!sv) return '⚠ 无法识别服务端版本（服务未启动或版本过旧）';
+    if (verOlder(sv, Store.APP_VERSION)) return '⚠ 服务端 ' + sv + ' 版本过旧，请更新代码后重启 server.js';
+    return '服务端 ' + sv;
+  }
+
   function buildCloudBlock(reopen) {
     var wrap = UI.el('div', { id: 'cloudBlock' });
     wrap.appendChild(UI.el('div', { style: 'font-size:12px;font-weight:700;color:var(--text-3);letter-spacing:.06em;padding:2px 2px 8px', text: '账号与云端同步' }));
@@ -1980,7 +2002,11 @@
       var av = UI.el('div', { class: 'avatar sm', style: 'background:linear-gradient(135deg,#4f6bff,#7b5bff);width:36px;height:36px;border-radius:12px;display:grid;place-items:center;color:#fff;font-weight:700', text: Store.cloud.user.slice(0, 1).toUpperCase() });
       var t = UI.el('div', { style: 'flex:1;min-width:0' });
       t.appendChild(UI.el('div', { style: 'font-weight:700;font-size:14px', text: Store.cloud.user }));
-      t.appendChild(UI.el('div', { style: 'font-size:12px;color:var(--text-3)', text: '上次同步 ' + syncTime + ' · 改动会自动上传' }));
+      var sub = UI.el('div', { style: 'font-size:12px;color:var(--text-3)', text: '上次同步 ' + syncTime + ' · 改动会自动上传 · 检测服务端…' });
+      t.appendChild(sub);
+      serverVerInfo().then(function (sv) {
+        sub.textContent = '上次同步 ' + syncTime + ' · 改动会自动上传 · ' + describeServerVer(sv);
+      });
       info.appendChild(av); info.appendChild(t);
       wrap.appendChild(info);
 
@@ -1989,12 +2015,16 @@
       var outBtn = UI.el('button', { class: 'btn plain small', style: 'flex:1', text: '退出登录' });
       btnRow.appendChild(syncBtn); btnRow.appendChild(outBtn);
       wrap.appendChild(btnRow);
+      wrap.appendChild(UI.el('div', { style: 'font-size:11.5px;color:var(--text-3);padding:0 2px 10px;line-height:1.6', text: '「立即同步」= 先把本机改动上传云端，再拉取云端数据合并到本机（双向）。日常改动都会自动上传，一般无需手动点。' }));
 
       syncBtn.addEventListener('click', function () {
         syncBtn.disabled = true; syncBtn.textContent = '同步中…';
         Store.cloud.push().then(function () { return Store.cloud.pull(); })
           .then(function (r) {
-            UI.toast('已同步' + (r && (r.added || r.updated) ? '：云端合并 ' + r.added + ' 新 / ' + r.updated + ' 更新' : '，云端已是最新'));
+            var merged = r && (r.added || r.updated)
+              ? '，并从云端拉取合并 ' + r.added + ' 新增 / ' + r.updated + ' 更新'
+              : '，云端无新改动';
+            UI.toast('本机改动已上传' + merged);
             reopen();
           })
           .catch(function (e) { syncBtn.disabled = false; syncBtn.textContent = '立即同步'; UI.toast((e && e.message) || '同步失败', 'err'); });
@@ -2013,6 +2043,13 @@
     var tip = UI.el('div', { style: 'font-size:12.5px;color:var(--text-2);background:var(--accent-soft);border-radius:12px;padding:10px 13px;margin:0 0 10px;line-height:1.7' });
     tip.innerHTML = '当前为<b>本地模式</b>。登录后聊天记录自动保存到服务器，多设备共用一份存档；本机已有数据会在登录时自动合并上云。';
     wrap.appendChild(tip);
+    var svLine = UI.el('div', { style: 'font-size:11.5px;color:var(--text-3);padding:0 2px 10px', text: '正在检测服务端版本…' });
+    serverVerInfo().then(function (sv) {
+      svLine.textContent = describeServerVer(sv);
+      if (sv && !verOlder(sv, Store.APP_VERSION)) return;
+      svLine.style.color = 'var(--danger, #e5588d)';
+    });
+    wrap.appendChild(svLine);
     var userIn = UI.el('input', { class: 'form-input', type: 'text', placeholder: '用户名（2-24位，中文/字母/数字）', autocomplete: 'username' });
     wrap.appendChild(UI.formGroup('用户名', userIn));
     var passIn = UI.el('input', { class: 'form-input', type: 'password', placeholder: '密码（至少 6 位）', autocomplete: 'current-password' });
@@ -2065,14 +2102,105 @@
 
     var customWrap = UI.el('div', {});
 
+    /* ---- API 配置列表：可添加、可切换、可删除 ---- */
+    var apiSel = UI.el('select', { class: 'form-input', style: 'flex:1;min-width:0' });
+    var addBtn = UI.el('button', { class: 'btn plain small', type: 'button', title: '把当前填写的配置另存为新配置', html: UI.icon('plus') });
+    var delBtn = UI.el('button', { class: 'btn plain small', type: 'button', title: '删除当前选中的配置', html: UI.icon('trash') });
+    var apiRow = UI.el('div', { class: 'form-row' });
+    apiRow.appendChild(apiSel); apiRow.appendChild(addBtn); apiRow.appendChild(delBtn);
+    customWrap.appendChild(UI.formGroup('API 配置', apiRow, '添加后一键切换；下方修改会自动保存到选中配置'));
+
+    function activeApi() {
+      return (st.apiList || []).find(function (a) { return a.id === st.activeApiId; }) || null;
+    }
+    // 选中配置被选中那一刻的原始值快照：点「+」另存新配置时用它还原，避免编辑字段误改旧配置
+    var pristineApi = null;
+    function snapApi(a) {
+      return { id: a.id, baseUrl: a.baseUrl, apiKey: a.apiKey, model: a.model, useProxy: a.useProxy };
+    }
+    function rebuildApiSel() {
+      apiSel.innerHTML = '';
+      var list = st.apiList || [];
+      delBtn.style.display = list.length ? '' : 'none';
+      if (!list.length) {
+        var ph = UI.el('option', { value: '', text: '暂无配置，填写下方后点 + 添加' });
+        ph.disabled = true; ph.selected = true;
+        apiSel.appendChild(ph);
+        return;
+      }
+      var placeholder = UI.el('option', { value: '', text: '— 选择配置 —' });
+      placeholder.disabled = true;
+      apiSel.appendChild(placeholder);
+      list.forEach(function (a) {
+        var o = UI.el('option', { value: a.id, text: a.name });
+        if (a.id === st.activeApiId) o.selected = true;
+        apiSel.appendChild(o);
+      });
+      if (!st.activeApiId) placeholder.selected = true;
+    }
+    function applyApi(a) {
+      pristineApi = snapApi(a);
+      st.activeApiId = a.id;
+      st.baseUrl = a.baseUrl; st.apiKey = a.apiKey; st.model = a.model; st.useProxy = a.useProxy;
+      urlIn.value = a.baseUrl; keyIn.value = a.apiKey; modelIn.value = a.model;
+      proxySwitch._input.checked = !!a.useProxy;
+      Store.persist(); updateComposerHint();
+    }
+    // 当前处于选中配置时，把输入框里的修改回写到该配置
+    function syncActive() {
+      var a = activeApi();
+      if (!a) return;
+      a.baseUrl = st.baseUrl; a.apiKey = st.apiKey; a.model = st.model; a.useProxy = st.useProxy;
+    }
+    apiSel.addEventListener('change', function () {
+      var a = (st.apiList || []).find(function (x) { return x.id === apiSel.value; });
+      if (a) applyApi(a);
+    });
+    addBtn.addEventListener('click', function () {
+      var sug = Store.apiHostName(st.baseUrl) || '自定义 API';
+      if ((st.apiList || []).some(function (a) { return a.name === sug; })) sug += ' 2';
+      UI.promptDialog({ title: '添加 API 配置', value: sug, placeholder: '给这份配置起个名字', okText: '添加', required: true })
+        .then(function (name) {
+          if (!name) return;
+          // 「编辑字段 → 另存为新配置」：把此前选中的配置还原为选中时的原值，新值只进新配置
+          if (pristineApi) {
+            var prev = (st.apiList || []).find(function (x) { return x.id === pristineApi.id; });
+            if (prev) {
+              prev.baseUrl = pristineApi.baseUrl; prev.apiKey = pristineApi.apiKey;
+              prev.model = pristineApi.model; prev.useProxy = pristineApi.useProxy;
+            }
+          }
+          var entry = { id: Store.uid(), name: name, baseUrl: st.baseUrl, apiKey: st.apiKey, model: st.model, useProxy: st.useProxy };
+          st.apiList.push(entry);
+          applyApi(entry);
+          rebuildApiSel();
+          Store.persist();
+          UI.toast('已添加配置「' + name + '」');
+        });
+    });
+    delBtn.addEventListener('click', function () {
+      var a = activeApi();
+      if (!a) return;
+      UI.confirmDialog({ title: '删除配置', message: '删除 API 配置「' + a.name + '」？', okText: '删除', danger: true })
+        .then(function (yes) {
+          if (!yes) return;
+          st.apiList = st.apiList.filter(function (x) { return x.id !== a.id; });
+          var next = st.apiList[0];
+          if (next) applyApi(next); else st.activeApiId = '';
+          rebuildApiSel();
+          Store.persist(); updateComposerHint();
+          UI.toast('已删除配置');
+        });
+    });
+
     var urlIn = UI.el('input', { class: 'form-input', type: 'url', placeholder: 'https://api.deepseek.com/v1', value: st.baseUrl });
-    urlIn.addEventListener('input', function () { st.baseUrl = urlIn.value.trim(); Store.persist(); });
+    urlIn.addEventListener('input', function () { st.baseUrl = urlIn.value.trim(); syncActive(); Store.persist(); });
     customWrap.appendChild(UI.formGroup('API 地址 (Base URL)', urlIn, 'OpenAI 兼容'));
 
     var keyShell = UI.el('div', { style: 'position:relative' });
     var keyIn = UI.el('input', { class: 'form-input', type: 'password', placeholder: 'sk-…', value: st.apiKey, autocomplete: 'off' });
-    keyIn.addEventListener('input', function () { st.apiKey = keyIn.value.trim(); Store.persist(); });
-    keyIn.addEventListener('change', function () { st.apiKey = keyIn.value.trim(); Store.persist(); });
+    keyIn.addEventListener('input', function () { st.apiKey = keyIn.value.trim(); syncActive(); Store.persist(); });
+    keyIn.addEventListener('change', function () { st.apiKey = keyIn.value.trim(); syncActive(); Store.persist(); });
     var eye = UI.el('button', { style: 'position:absolute;right:6px;top:50%;transform:translateY(-50%);width:34px;height:34px;display:grid;place-items:center;color:var(--text-3)', html: UI.icon('eye') });
     eye.addEventListener('click', function () {
       var show = keyIn.type === 'password';
@@ -2083,8 +2211,8 @@
     customWrap.appendChild(UI.formGroup('API Key', keyShell, '仅保存在本机浏览器'));
 
     var modelIn = UI.el('input', { class: 'form-input', type: 'text', list: 'modelList', placeholder: 'deepseek-chat / gpt-4o-mini …', value: st.model });
-    modelIn.addEventListener('input', function () { st.model = modelIn.value.trim(); Store.persist(); updateComposerHint(); });
-    modelIn.addEventListener('change', function () { st.model = modelIn.value.trim(); Store.persist(); updateComposerHint(); });
+    modelIn.addEventListener('input', function () { st.model = modelIn.value.trim(); syncActive(); Store.persist(); updateComposerHint(); });
+    modelIn.addEventListener('change', function () { st.model = modelIn.value.trim(); syncActive(); Store.persist(); updateComposerHint(); });
     var dl = UI.el('datalist', { id: 'modelList' });
     ['deepseek-chat', 'deepseek-reasoner', 'gpt-4o-mini', 'gpt-4.1-mini', 'qwen-plus', 'glm-4-flash', 'moonshot-v1-8k'].forEach(function (m) {
       dl.appendChild(UI.el('option', { value: m }));
@@ -2092,8 +2220,12 @@
     var mg = UI.formGroup('模型名称', modelIn);
     mg.appendChild(dl);
     customWrap.appendChild(mg);
-    var proxySwitch = UI.switchRow('通过本地代理转发', '接口跨域(CORS)报错时开启，需使用 node server.js 启动', st.useProxy, function (v) { st.useProxy = v; Store.persist(); });
+    var proxySwitch = UI.switchRow('通过本地代理转发', '接口跨域(CORS)报错时开启，需使用 node server.js 启动', st.useProxy, function (v) { st.useProxy = v; syncActive(); Store.persist(); });
     customWrap.appendChild(proxySwitch);
+
+    var openActive = activeApi();
+    if (openActive) pristineApi = snapApi(openActive);
+    rebuildApiSel();
 
     body.appendChild(customWrap);
 

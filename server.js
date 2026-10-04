@@ -188,6 +188,7 @@ function handleMock(req, res) {
  * 直到用户主动退出。每个账号云端保存一份与浏览器 localStorage 同构的完整状态。
  */
 const DATA_DIR = path.join(ROOT, 'data');
+const SERVER_VERSION = 'v1.6';
 const ACCOUNTS_DIR = path.join(DATA_DIR, 'accounts');
 const SESSIONS_FILE = path.join(DATA_DIR, 'sessions.json');
 const STATE_MAX = 64 * 1024 * 1024; // 单份存档上限 64MB
@@ -278,7 +279,7 @@ async function handleCloudApi(req, res, pathname) {
       const username = String(j.username || '').trim();
       const password = String(j.password || '');
       const acc = readJson(accountFile(username), null);
-      if (!acc) return json(res, 401, { error: '用户名或密码错误' });
+      if (!acc) return json(res, 401, { error: '用户名或密码错误（若该用户名从未注册过，请先点「注册新账号」）' });
       // 注意: hashPassword 返回 64 字节的 hex 字符串，双方都转成 Buffer 再比长度（此前
       // 误用 Buffer.length(64) 与字符串 .length(128) 相比，导致任何密码都 401）
       const calc = Buffer.from(hashPassword(password, acc.salt), 'hex');
@@ -547,6 +548,10 @@ const server = http.createServer((req, res) => {
     return json(res, 200, { ok: true });
   }
 
+  if (u.pathname === '/api/health' && req.method === 'GET') {
+    return json(res, 200, { ok: true, version: SERVER_VERSION });
+  }
+
   if (u.pathname.startsWith('/api/auth/') || u.pathname === '/api/state') {
     return handleCloudApi(req, res, u.pathname);
   }
@@ -568,7 +573,7 @@ server.listen(PORT, () => {
       if (n.family === 'IPv4' && !n.internal) lan.push(n.address);
     });
   });
-  console.log('\n  ✦ 幻语 · 角色扮演对话 已启动\n');
+  console.log(`\n  ✦ 幻语 · 角色扮演对话 ${SERVER_VERSION} 已启动\n`);
   console.log(`  本机访问   http://localhost:${PORT}`);
   lan.forEach((ip) => console.log(`  手机访问   http://${ip}:${PORT}   （同一 WiFi）`));
   console.log('\n  提示: 手机上遇到接口跨域报错时，在「后台设置」里打开「通过本地代理转发」。\n');
