@@ -1036,6 +1036,15 @@
 
   /* ---------------- 发送与流式生成 ---------------- */
   var currentGen = null;
+  // 云端实时同步: 远端有数据合并进来时刷新界面, 并对他机发起的生成消息自动续读;
+  // 本机正在生成的对话通过 mergeGuard 保护, 不被远端合并覆盖（流式增量还挂在本地对象上）
+  var autoResumed = new Set();
+  Store.cloud.mergeGuard = function () { return currentGen ? [currentGen.convId] : null; };
+  Store.cloud.onChange = function () {
+    if (currentGen) return; // 生成结束后 finalize→persist→push, 各端自然收敛
+    renderAll();
+    resumePendingTasks();
+  };
 
   function updateComposerState() {
     var sendBtn = $('#sendBtn');
@@ -1168,6 +1177,8 @@
         messages: Store.buildContext(conv),
         settings: state.settings,
         charName: (convChar(conv) || wc || {}).name || '对方',
+        convId: conv.id,   // 告知服务器任务归属: 收尾自动写回账号存档, 其他设备实时可见
+        msgId: m.id,
         signal: ctrl.signal,
         worldMode: conv.type === 'world',
         worldCharMode: !!wc,
@@ -1178,6 +1189,14 @@
         onTaskId: function (tid) {
           m.taskId = tid; // 记在消息上, 浏览器关掉后仍可按 taskId 恢复
           Store.persist();
+        },
+        onRetry: function (n, max) {
+          // 上一轮尝试可能已吐出半截内容, 重试前清空重来, 避免拼接重复
+          m.content = ''; m.reasoning = ''; m.thinkMs = undefined;
+          hasFirstToken = false;
+          thinkStart = Date.now();
+          refreshMsgNode(conv, m, false);
+          UI.toast('请求失败，自动重试 ' + n + '/' + max + '…');
         },
         onReasoning: function (t) {
           m.reasoning += t;
@@ -1218,30 +1237,51 @@
 
   /* ---------------- 断线恢复：重开浏览器/换设备后续读服务器任务 ---------------- */
 
-  /** 把一条带 taskId 的未完成消息重新挂回服务器任务，收尾与在线生成完全一致 */
+  /** 把一条带 taskId 的未完成消息重新挂回服务器任务，收尾与在线生成完全一致。
+   *  触发来源有两处: 启动时的 resumePendingTasks() 与云端合并进来的他机生成消息（实时同步）。
+   *  期间云端合并可能整体替换对话对象，因此每次回调都按 id 重新解析最新的 conv/message。 */
   function resumeTask(conv, m) {
+    if (autoResumed.has(m.id)) return;
+    autoResumed.add(m.id);
     var hasFirst = !!(m.content || m.reasoning);
+    function live() {
+      var c = state.conversations.find(function (x) { return x.id === conv.id; });
+      var mm = c ? (c.messages || []).find(function (x) { return x.id === m.id; }) : null;
+      return (c && mm) ? { c: c, m: mm } : null;
+    }
     function touchLive() {
-      if (Store.activeConv() !== conv) return; // 非当前对话只更新数据, 不动界面
+      var l = live();
+      if (!l || Store.activeConv() !== l.c) return; // 非当前对话只更新数据, 不动界面
       var light = hasFirst;
-      hasFirst = hasFirst || !!m.content || !!m.reasoning;
-      refreshMsgNode(conv, m, light);
+      hasFirst = hasFirst || !!l.m.content || !!l.m.reasoning;
+      refreshMsgNode(l.c, l.m, light);
     }
     API.resumeTask(m.taskId, {
-      onReasoning: function (t) { m.reasoning = (m.reasoning || '') + t; touchLive(); },
-      onDelta: function (t) { m.content = (m.content || '') + t; touchLive(); }
-    }).then(function (r) {
-      m.pending = false;
-      if (!m.content) { m.content = '（对方沉默了片刻…）'; }
-      if (r && r.stopped) {
-        m.stopped = true;
-        m.content += '\n\n（已停止生成）';
+      onReasoning: function (t) {
+        var l = live(); if (!l) return;
+        l.m.reasoning = (l.m.reasoning || '') + t; touchLive();
+      },
+      onDelta: function (t) {
+        var l = live(); if (!l) return;
+        l.m.content = (l.m.content || '') + t; touchLive();
       }
-      finalizeGenMessage(conv, m);
+    }).then(function (r) {
+      var l = live();
+      if (!l || !l.m.pending) return; // 消息已被云端合并收尾, 放弃本地收尾
+      l.m.content = (r && r.content) || l.m.content; // 以任务完整内容为准, 消除拼接重复
+      l.m.reasoning = (r && r.reasoning) || l.m.reasoning || '';
+      l.m.pending = false;
+      if (r && r.stopped) {
+        l.m.stopped = true;
+        l.m.content += '\n\n（已停止生成）';
+      }
+      finalizeGenMessage(l.c, l.m);
     }).catch(function (e) {
-      m.pending = false;
-      m.error = (e && e.message) || String(e);
-      finalizeGenMessage(conv, m);
+      var l = live();
+      if (!l || !l.m.pending) return;
+      l.m.pending = false;
+      l.m.error = (e && e.message) || String(e);
+      finalizeGenMessage(l.c, l.m);
     });
   }
 
@@ -2222,6 +2262,15 @@
     customWrap.appendChild(mg);
     var proxySwitch = UI.switchRow('通过本地代理转发', '接口跨域(CORS)报错时开启，需使用 node server.js 启动', st.useProxy, function (v) { st.useProxy = v; syncActive(); Store.persist(); });
     customWrap.appendChild(proxySwitch);
+
+    var retryIn = UI.el('input', { class: 'form-input', type: 'number', min: '0', max: '10', step: '1', value: String(st.taskRetry != null ? st.taskRetry : 2) });
+    retryIn.addEventListener('change', function () {
+      var v = Math.round(Number(retryIn.value));
+      st.taskRetry = Number.isFinite(v) ? Math.max(0, Math.min(10, v)) : 2;
+      retryIn.value = String(st.taskRetry);
+      Store.persist();
+    });
+    customWrap.appendChild(UI.formGroup('失败自动重试次数', retryIn, '创建任务或上游临时故障（5xx / 超时）时自动重试，0 为不重试'));
 
     var openActive = activeApi();
     if (openActive) pristineApi = snapApi(openActive);

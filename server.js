@@ -9,6 +9,7 @@ const https = require('https');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const zlib = require('zlib');
 const crypto = require('crypto');
 const { URL } = require('url');
 const { StringDecoder } = require('string_decoder');
@@ -35,17 +36,59 @@ function setCors(res) {
   res.setHeader('Access-Control-Allow-Headers', '*');
 }
 
+/* 静态资源服务：gzip 压缩（内存缓存）+ ETag 协商缓存；
+ * 带 ?v= 版本号的资源走一年强缓存（index.html 引用在发版时更新 ?v=），弱网/手机加载速度大幅提升 */
+const STATIC_GZIP = new Map(); // 绝对路径 -> { etag, buf }
 function serveStatic(req, res, pathname) {
   let file = pathname === '/' ? '/index.html' : pathname;
   const full = path.join(ROOT, path.normalize(file).replace(/^(\.\.[/\\])+/, ''));
   if (!full.startsWith(ROOT)) { res.writeHead(403); return res.end('Forbidden'); }
-  fs.readFile(full, (err, data) => {
-    if (err) { res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' }); return res.end('404 Not Found'); }
-    res.writeHead(200, {
+  fs.stat(full, (err, st) => {
+    if (err || !st.isFile()) {
+      res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
+      return res.end('404 Not Found');
+    }
+    const etag = '"' + st.size.toString(36) + '-' + Math.floor(st.mtimeMs).toString(36) + '"';
+    const isIndex = file === '/index.html';
+    const immutable = !isIndex && /[?&]v=/.test(req.url);
+    const headers = {
       'Content-Type': MIME[path.extname(full).toLowerCase()] || 'application/octet-stream',
-      'Cache-Control': 'no-cache'
+      'Cache-Control': immutable ? 'public, max-age=31536000, immutable' : 'no-cache',
+      'ETag': etag
+    };
+    if (req.headers['if-none-match'] === etag) {
+      res.writeHead(304, headers);
+      return res.end();
+    }
+    const canGzip = /\bgzip\b/.test(String(req.headers['accept-encoding'] || '')) &&
+                    /\.(?:js|css|html|svg|json|txt)$/i.test(full);
+    if (!canGzip) {
+      fs.readFile(full, (e2, data) => {
+        if (e2) { res.writeHead(404); return res.end('404 Not Found'); }
+        headers['Content-Length'] = data.length;
+        res.writeHead(200, headers);
+        res.end(data);
+      });
+      return;
+    }
+    const cached = STATIC_GZIP.get(full);
+    if (cached && cached.etag === etag) {
+      headers['Content-Encoding'] = 'gzip';
+      headers['Vary'] = 'Accept-Encoding';
+      headers['Content-Length'] = cached.buf.length;
+      res.writeHead(200, headers);
+      return res.end(cached.buf);
+    }
+    fs.readFile(full, (e2, data) => {
+      if (e2) { res.writeHead(404); return res.end('404 Not Found'); }
+      const buf = zlib.gzipSync(data, { level: 6 });
+      STATIC_GZIP.set(full, { etag: etag, buf: buf });
+      headers['Content-Encoding'] = 'gzip';
+      headers['Vary'] = 'Accept-Encoding';
+      headers['Content-Length'] = buf.length;
+      res.writeHead(200, headers);
+      res.end(buf);
     });
-    res.end(data);
   });
 }
 
@@ -188,7 +231,7 @@ function handleMock(req, res) {
  * 直到用户主动退出。每个账号云端保存一份与浏览器 localStorage 同构的完整状态。
  */
 const DATA_DIR = path.join(ROOT, 'data');
-const SERVER_VERSION = 'v1.6';
+const SERVER_VERSION = 'v1.7';
 const ACCOUNTS_DIR = path.join(DATA_DIR, 'accounts');
 const SESSIONS_FILE = path.join(DATA_DIR, 'sessions.json');
 const STATE_MAX = 64 * 1024 * 1024; // 单份存档上限 64MB
@@ -309,7 +352,13 @@ async function handleCloudApi(req, res, pathname) {
     if (!acc) return json(res, 401, { error: '账号不存在，请重新登录' });
 
     if (pathname === '/api/state' && req.method === 'GET') {
-      return json(res, 200, { ok: true, state: acc.state, updatedAt: acc.updatedAt || 0 });
+      // 带 ?rev=N 轮询：版本未变返回 unchanged（几十字节），客户端据此实现实时同步
+      let want = 0;
+      try { want = Number(new URL(req.url, 'http://x').searchParams.get('rev')) || 0; } catch (e) { /* ignore */ }
+      if (want > 0 && (acc.rev || 0) === want) {
+        return json(res, 200, { ok: true, unchanged: true, rev: want });
+      }
+      return json(res, 200, { ok: true, state: acc.state, updatedAt: acc.updatedAt || 0, rev: acc.rev || 0 });
     }
 
     if (pathname === '/api/state' && req.method === 'PUT') {
@@ -318,10 +367,13 @@ async function handleCloudApi(req, res, pathname) {
       if (!st || typeof st !== 'object' || !Array.isArray(st.conversations)) {
         return json(res, 400, { error: '存档格式不正确' });
       }
-      acc.state = st;
-      acc.updatedAt = Date.now();
-      writeJson(accFile, acc);
-      return json(res, 200, { ok: true, updatedAt: acc.updatedAt });
+      // 重新读盘：readBody 的异步间隙里，后台任务回写可能已改过账号文件，不能覆盖在旧快照上
+      const fresh = readJson(accFile, null) || acc;
+      fresh.state = st;
+      fresh.updatedAt = Date.now();
+      fresh.rev = (fresh.rev || 0) + 1;
+      writeJson(accFile, fresh);
+      return json(res, 200, { ok: true, updatedAt: fresh.updatedAt, rev: fresh.rev });
     }
 
     return json(res, 404, { error: 'not found' });
@@ -362,6 +414,36 @@ function queueSaveTask(t) {
   if (t.finished || t.saveTimer) return;
   t.saveTimer = setTimeout(function () { t.saveTimer = null; writeTaskFile(t); }, 250);
 }
+
+/** 任务收尾后把消息写回账号存档：这是跨设备实时同步的关键——
+ *  发起设备哪怕当场关机，任何设备的 rev 轮询都能拿到已完成的回复。
+ *  尽力而为：未登录/找不到对话或消息/已被客户端收尾时静默跳过。 */
+function commitTaskToAccount(t) {
+  if (!t.owner || !t.convId || !t.msgId) return;
+  if (!t.content && !t.reasoning && !t.error) return;
+  try {
+    const f = accountFile(t.owner);
+    const acc = readJson(f, null);
+    if (!acc || !acc.state) return;
+    const conv = (acc.state.conversations || []).find((c) => c && c.id === t.convId);
+    if (!conv) return;
+    const m = (conv.messages || []).find((x) => x && x.id === t.msgId);
+    if (!m || !m.pending) return; // 发起设备已自己收尾并推送过，无需重复
+    if (t.content) m.content = t.content;
+    if (t.reasoning) m.reasoning = t.reasoning;
+    m.pending = false;
+    if (t.stopped) {
+      m.stopped = true;
+      m.content += (m.content ? '\n\n' : '') + '（已停止生成）';
+    }
+    if (t.status === 'error') m.error = t.error || '生成失败';
+    else if (!m.content) m.content = '（对方沉默了片刻…）';
+    conv.updatedAt = Date.now();
+    acc.rev = (acc.rev || 0) + 1;
+    writeJson(f, acc);
+  } catch (e) { /* 回写失败不影响任务本身 */ }
+}
+
 function finishTask(t, status, errMsg) {
   if (t.finished) return;
   if (t.saveTimer) { clearTimeout(t.saveTimer); t.saveTimer = null; }
@@ -375,6 +457,7 @@ function finishTask(t, status, errMsg) {
   }
   t.status = t.error ? 'error' : status;
   writeTaskFile(t);
+  commitTaskToAccount(t);
 }
 
 /** 解析上游 SSE 单行，逐字累积到任务（含部分网关的非流式 message 兜底） */
@@ -501,10 +584,16 @@ async function handleTaskCreate(req, res) {
   if (!body || typeof body !== 'object' || !Array.isArray(body.messages)) {
     return json(res, 400, { error: 'body.messages 不合法' });
   }
+  // 登录用户附带对话/消息 ID：任务收尾时自动把回复写回账号存档（跨设备实时同步）
+  const owner = currentUser(req);
+  const convId = String(j.convId || '').slice(0, 80);
+  const msgId = String(j.msgId || '').slice(0, 80);
   const id = crypto.randomBytes(16).toString('hex');
   const t = {
     id: id, status: 'running', content: '', reasoning: '',
     error: null, stopped: false, updatedAt: Date.now(),
+    owner: owner && convId && msgId ? owner : null,
+    convId: convId, msgId: msgId,
     apiKey: apiKey, req: null, saveTimer: null, finished: false
   };
   liveTasks.set(id, t);

@@ -157,7 +157,9 @@
       body: JSON.stringify({
         url: url,
         apiKey: demo ? '' : (s.apiKey || ''),
-        body: buildBody(s, opts.messages, true)
+        body: buildBody(s, opts.messages, true),
+        convId: opts.convId || '',   // 登录状态下服务器任务收尾会自动写回账号存档
+        msgId: opts.msgId || ''
       }),
       signal: opts.signal
     });
@@ -241,11 +243,30 @@
     return { content: d.content || '', reasoning: d.reasoning || '', stopped: !!d.stopped };
   }
 
-  /** 任务模式主入口：创建任务 → 轮询直至完成 */
+  /** 任务模式主入口：创建任务 → 轮询直至完成。
+   *  创建失败或上游临时故障（HTTP 5xx / 超时 / 连接类错误）时自动重试，
+   *  次数取 settings.taskRetry（设置面板可改，默认 2 次）；401/400 等配置类错误不重试。 */
+  var TRANSIENT_ERR = /HTTP\s*5\d\d|\b50[0-4]\b|timeout|timed?\s*-?\s*out|ECONN|EPIPE|socket\s|network|网络|连接|无法连接/i;
+
   async function chatTask(opts) {
-    var taskId = await createTask(opts);
-    if (opts.onTaskId) opts.onTaskId(taskId);
-    return pollTask(taskId, opts);
+    var cfg = Number(opts.settings && opts.settings.taskRetry);
+    var retries = Number.isFinite(cfg) ? Math.max(0, Math.min(10, Math.round(cfg))) : 2;
+    var attempt = 0;
+    while (true) {
+      try {
+        var taskId = await createTask(opts);
+        if (opts.onTaskId) opts.onTaskId(taskId);
+        return await pollTask(taskId, opts);
+      } catch (e) {
+        if (opts.signal && opts.signal.aborted) throw e;
+        var msg = String((e && e.message) || e);
+        if (attempt >= retries || !TRANSIENT_ERR.test(msg)) throw e;
+        attempt++;
+        if (opts.onRetry) opts.onRetry(attempt, retries);
+        await new Promise(function (res) { setTimeout(res, 1200 * attempt); });
+        if (opts.signal && opts.signal.aborted) throw e;
+      }
+    }
   }
 
   /** 按 taskId 续读一个已有任务（页面重开/换设备后恢复未完成的消息） */

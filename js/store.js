@@ -3,7 +3,7 @@
   'use strict';
 
   var KEY = 'huanyu.v1';
-  var APP_VERSION = 'v1.6';
+  var APP_VERSION = 'v1.7';
 
   function uid() {
     return Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
@@ -307,6 +307,7 @@
       thinking: 'off',            // off | low | medium | high
       extraBody: '',
       useProxy: false,
+      taskRetry: 2,               // 生成任务创建/上游临时故障的自动重试次数
       roleplayMode: true,
       theme: 'auto',              // auto | light | dark
       historyLimit: 40
@@ -443,11 +444,12 @@
    */
   var CLOUD_KEY = 'huanyu.cloud';
   var cloud = (function () {
-    try { return Object.assign({ user: null, lastSync: 0 }, JSON.parse(localStorage.getItem(CLOUD_KEY) || '{}')); }
-    catch (e) { return { user: null, lastSync: 0 }; }
+    try { return Object.assign({ user: null, lastSync: 0, rev: 0 }, JSON.parse(localStorage.getItem(CLOUD_KEY) || '{}')); }
+    catch (e) { return { user: null, lastSync: 0, rev: 0 }; }
   })();
   var cloudPushTimer = null;
   var cloudBusy = false; // 拉取合并期间暂停自动推送，防止拉取→保存→再推送的回环
+  var cloudOnChange = null; // app.js 注入: 远端有变化合并进来后的界面回调
 
   function cloudSaveLocal() {
     try { localStorage.setItem(CLOUD_KEY, JSON.stringify(cloud)); } catch (e) { /* ignore */ }
@@ -470,17 +472,23 @@
     if (!remote || typeof remote !== 'object') return { added: added, updated: updated };
     ['characters', 'worlds', 'skills', 'conversations'].forEach(function (key) {
       if (!Array.isArray(remote[key])) return;
+      var guard = null;
+      if (key === 'conversations' && typeof mergeGuardFn === 'function') guard = mergeGuardFn() || null;
       state[key] = state[key] || [];
       remote[key].forEach(function (r) {
         if (!r || !r.id) return;
         var i = state[key].findIndex(function (x) { return x.id === r.id; });
         if (i < 0) { state[key].push(r); added++; }
-        else if ((r.updatedAt || 0) > (state[key][i].updatedAt || 0)) { state[key][i] = r; updated++; }
+        else if ((r.updatedAt || 0) > (state[key][i].updatedAt || 0)) {
+          // 本机正在生成中的对话不动本地对象（流式增量还挂在它上面），收尾推送后自然收敛
+          if (guard && guard.indexOf(r.id) >= 0) return;
+          state[key][i] = r; updated++;
+        }
       });
     });
     dedupeSkills();
     if (remote.settings && typeof remote.settings === 'object') {
-      var deviceLocal = { apiMode: 1, baseUrl: 1, apiKey: 1, model: 1, extraBody: 1, useProxy: 1, apiList: 1, activeApiId: 1 };
+      var deviceLocal = { apiMode: 1, baseUrl: 1, apiKey: 1, model: 1, extraBody: 1, useProxy: 1, taskRetry: 1, apiList: 1, activeApiId: 1 };
       state.settings = state.settings || {};
       Object.keys(remote.settings).forEach(function (k) {
         if (!deviceLocal[k]) state.settings[k] = remote.settings[k];
@@ -492,8 +500,15 @@
   function cloudPull() {
     if (!cloud.user) return Promise.reject(new Error('未登录'));
     cloudBusy = true;
-    return cloudApi('/api/state').then(function (d) {
-      var r = d.state ? mergeCloudState(d.state) : { added: 0, updated: 0 };
+    var qs = cloud.rev ? ('?rev=' + encodeURIComponent(cloud.rev)) : '';
+    return cloudApi('/api/state' + qs).then(function (d) {
+      var r;
+      if (d.unchanged) {
+        r = { added: 0, updated: 0, unchanged: true };
+      } else {
+        cloud.rev = d.rev || 0;
+        r = d.state ? mergeCloudState(d.state) : { added: 0, updated: 0 };
+      }
       if (r.added || r.updated) persist();
       cloud.lastSync = Date.now();
       cloudSaveLocal();
@@ -505,7 +520,11 @@
   function cloudPush() {
     if (!cloud.user) return Promise.reject(new Error('未登录'));
     return cloudApi('/api/state', { method: 'PUT', body: JSON.stringify({ state: state }) })
-      .then(function () { cloud.lastSync = Date.now(); cloudSaveLocal(); });
+      .then(function (d) {
+        cloud.rev = (d && d.rev) || (cloud.rev + 1);
+        cloud.lastSync = Date.now();
+        cloudSaveLocal();
+      });
   }
 
   function scheduleCloudPush() {
@@ -513,6 +532,23 @@
     clearTimeout(cloudPushTimer);
     cloudPushTimer = setTimeout(function () { cloudPush().catch(function () { /* 离线时静默，下次改动再推 */ }); }, 2500);
   }
+
+  /* ---------------- 实时同步（rev 轮询） ----------------
+   * 任何一端的数据变化（含服务器后台任务完成后的自动回写）都会使账号 rev+1。
+   * 各端每 4 秒带 rev 探测一次：未变时响应只有几十字节；有变即拉取合并并触发界面刷新，
+   * 同一账号在多设备间逐消息实时同步，无需手动点「立即同步」。 */
+  var mergeGuardFn = null;   // app.js 注入: 返回本机正在生成、暂不接受远端覆盖的对话 id 数组
+  var pullInflight = false;
+  var pollHiddenTicks = 0;
+  setInterval(function () {
+    if (!cloud.user || cloudBusy || pullInflight) return;
+    if (document.hidden && (++pollHiddenTicks % 5)) return; // 页面切后台时降频到约 20 秒一次
+    pullInflight = true;
+    cloudPull().then(function (r) {
+      pullInflight = false;
+      if (cloudOnChange && (r.added || r.updated)) cloudOnChange(r);
+    }).catch(function () { pullInflight = false; });
+  }, 4000);
 
   function cloudInit() {
     return cloudApi('/api/auth/me').then(function (d) {
@@ -780,6 +816,10 @@
     cloud: {
       get user() { return cloud.user; },
       get lastSync() { return cloud.lastSync; },
+      get onChange() { return cloudOnChange; },
+      set onChange(v) { cloudOnChange = v; },
+      get mergeGuard() { return mergeGuardFn; },
+      set mergeGuard(v) { mergeGuardFn = v; },
       init: cloudInit, login: cloudLogin, register: cloudRegister, logout: cloudLogout,
       pull: cloudPull, push: cloudPush
     }
