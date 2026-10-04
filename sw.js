@@ -1,7 +1,7 @@
 /* 幻语 · 极简 Service Worker：网络优先，离线兜底 */
 'use strict';
-const CACHE = 'huanyu-v1.7';
-const ASSETS = ['./', './index.html', './css/style.css', './js/markdown.js?v=1.7', './js/store.js?v=1.7', './js/api.js?v=1.7', './js/ui.js?v=1.7', './js/app.js?v=1.7', './manifest.json', './icon.svg'];
+const CACHE = 'huanyu-v1.7.2';
+const ASSETS = ['./', './index.html', './css/style.css', './js/markdown.js?v=1.7.2', './js/store.js?v=1.7.2', './js/api.js?v=1.7.2', './js/ui.js?v=1.7.2', './js/app.js?v=1.7.2', './manifest.json', './icon.svg'];
 
 self.addEventListener('install', (e) => {
   e.waitUntil(caches.open(CACHE).then((c) => c.addAll(ASSETS)).then(() => self.skipWaiting()));

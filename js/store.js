@@ -3,7 +3,7 @@
   'use strict';
 
   var KEY = 'huanyu.v1';
-  var APP_VERSION = 'v1.7';
+  var APP_VERSION = 'v1.7.2';
 
   function uid() {
     return Date.now().toString(36) + Math.random().toString(36).slice(2, 8);

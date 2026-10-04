@@ -2263,15 +2263,6 @@
     var proxySwitch = UI.switchRow('通过本地代理转发', '接口跨域(CORS)报错时开启，需使用 node server.js 启动', st.useProxy, function (v) { st.useProxy = v; syncActive(); Store.persist(); });
     customWrap.appendChild(proxySwitch);
 
-    var retryIn = UI.el('input', { class: 'form-input', type: 'number', min: '0', max: '10', step: '1', value: String(st.taskRetry != null ? st.taskRetry : 2) });
-    retryIn.addEventListener('change', function () {
-      var v = Math.round(Number(retryIn.value));
-      st.taskRetry = Number.isFinite(v) ? Math.max(0, Math.min(10, v)) : 2;
-      retryIn.value = String(st.taskRetry);
-      Store.persist();
-    });
-    customWrap.appendChild(UI.formGroup('失败自动重试次数', retryIn, '创建任务或上游临时故障（5xx / 超时）时自动重试，0 为不重试'));
-
     var openActive = activeApi();
     if (openActive) pristineApi = snapApi(openActive);
     rebuildApiSel();
@@ -2309,6 +2300,15 @@
     histIn.addEventListener('change', function () { st.historyLimit = Number(histIn.value) || 40; Store.persist(); });
     row.appendChild(UI.formGroup('上下文条数', histIn, '带上最近几条消息'));
     body.appendChild(row);
+
+    var retryIn = UI.el('input', { class: 'form-input', type: 'number', min: '0', max: '10', step: '1', value: String(st.taskRetry != null ? st.taskRetry : 2) });
+    retryIn.addEventListener('change', function () {
+      var v = Math.round(Number(retryIn.value));
+      st.taskRetry = Number.isFinite(v) ? Math.max(0, Math.min(10, v)) : 2;
+      retryIn.value = String(st.taskRetry);
+      Store.persist();
+    });
+    body.appendChild(UI.formGroup('失败自动重试次数', retryIn, '生成请求临时故障（5xx / 超时）时自动重试，0 为不重试'));
 
     var extraTa = UI.el('textarea', { class: 'form-textarea', rows: 2, placeholder: '{"top_p": 0.9}', value: st.extraBody || '' });
     extraTa.addEventListener('change', function () { st.extraBody = extraTa.value; Store.persist(); });

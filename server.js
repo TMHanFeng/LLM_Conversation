@@ -231,7 +231,7 @@ function handleMock(req, res) {
  * 直到用户主动退出。每个账号云端保存一份与浏览器 localStorage 同构的完整状态。
  */
 const DATA_DIR = path.join(ROOT, 'data');
-const SERVER_VERSION = 'v1.7';
+const SERVER_VERSION = 'v1.7.2';
 const ACCOUNTS_DIR = path.join(DATA_DIR, 'accounts');
 const SESSIONS_FILE = path.join(DATA_DIR, 'sessions.json');
 const STATE_MAX = 64 * 1024 * 1024; // 单份存档上限 64MB
