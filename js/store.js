@@ -3,7 +3,7 @@
   'use strict';
 
   var KEY = 'huanyu.v1';
-  var APP_VERSION = 'v1.7.2';
+  var APP_VERSION = 'v1.7.3';
 
   function uid() {
     return Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
@@ -439,8 +439,12 @@
   }
 
   /* ---------------- 云端同步（账号 · Cookie 会话） ----------------
-   * 登录后自动双向同步：本地改动防抖推送；启动/登录时拉取并按
-   * 「实体为单位、updatedAt 新者胜」合并。连接类设置（API 地址/Key 等）保留在各设备本地。
+   * 服务器为准的双向同步：启动/登录时强制全量拉取并按「实体为单位、
+   * updatedAt 新者胜」合并；本地改动防抖推送，但推送携带 baseRev 乐观锁——
+   * 云端 rev 已被其他设备/后台任务推进时服务器拒绝（409），客户端先拉取合并
+   * 再重推，任何设备都不可能用陈旧本地存档覆盖云端（防「少覆盖多」）。
+   * 启动后首次拉取成功之前绝不自动推送（弱网设备先上线也不会冲掉云端）。
+   * 模型配置（apiMode/apiList/activeApiId）随账号同步；代理等本机偏好留在设备本地。
    */
   var CLOUD_KEY = 'huanyu.cloud';
   var cloud = (function () {
@@ -448,7 +452,10 @@
     catch (e) { return { user: null, lastSync: 0, rev: 0 }; }
   })();
   var cloudPushTimer = null;
-  var cloudBusy = false; // 拉取合并期间暂停自动推送，防止拉取→保存→再推送的回环
+  var cloudBusy = false;    // 拉取合并期间暂停自动推送，防止拉取→保存→再推送的回环
+  var pullOk = false;       // 本次页面生命周期内是否成功拉取过：成功前禁止推送（防陈旧覆盖）
+  var everPulled = false;   // 首次拉取成功后自动补推一次，把离线期间积累的本机改动送上云
+  var pushPending = false;  // 推送失败过（离线等）：下次拉取成功后自动补推
   var cloudOnChange = null; // app.js 注入: 远端有变化合并进来后的界面回调
 
   function cloudSaveLocal() {
@@ -488,19 +495,24 @@
     });
     dedupeSkills();
     if (remote.settings && typeof remote.settings === 'object') {
-      var deviceLocal = { apiMode: 1, baseUrl: 1, apiKey: 1, model: 1, extraBody: 1, useProxy: 1, taskRetry: 1, apiList: 1, activeApiId: 1 };
+      // 仅「本机偏好」不同步；模型配置（apiMode/apiList/activeApiId）随账号走，
+      // 换设备登录即得到同一套 API 配置。云端已有值时以云端为准。
+      var deviceLocal = { baseUrl: 1, apiKey: 1, model: 1, extraBody: 1, useProxy: 1, taskRetry: 1 };
       state.settings = state.settings || {};
       Object.keys(remote.settings).forEach(function (k) {
         if (!deviceLocal[k]) state.settings[k] = remote.settings[k];
       });
+      migrateApiList(state.settings);
     }
     return { added: added, updated: updated };
   }
 
-  function cloudPull() {
+  function cloudPull(force) {
     if (!cloud.user) return Promise.reject(new Error('未登录'));
     cloudBusy = true;
-    var qs = cloud.rev ? ('?rev=' + encodeURIComponent(cloud.rev)) : '';
+    // force（启动/登录）不带 rev：无条件全量拉取，以服务器为准；
+    // 日常轮询带 rev 探测，未变时响应只有几十字节。
+    var qs = (!force && cloud.rev) ? ('?rev=' + encodeURIComponent(cloud.rev)) : '';
     return cloudApi('/api/state' + qs).then(function (d) {
       var r;
       if (d.unchanged) {
@@ -513,24 +525,41 @@
       cloud.lastSync = Date.now();
       cloudSaveLocal();
       cloudBusy = false;
+      pullOk = true;
+      if (!everPulled) { everPulled = true; scheduleCloudPush(); } // 首次同步成功即补推本机改动（含离线期间积累的）
+      else if (pushPending) { pushPending = false; scheduleCloudPush(); }
       return r;
     }).catch(function (e) { cloudBusy = false; throw e; });
   }
 
-  function cloudPush() {
+  function cloudPush(retried) {
     if (!cloud.user) return Promise.reject(new Error('未登录'));
-    return cloudApi('/api/state', { method: 'PUT', body: JSON.stringify({ state: state }) })
-      .then(function (d) {
-        cloud.rev = (d && d.rev) || (cloud.rev + 1);
-        cloud.lastSync = Date.now();
-        cloudSaveLocal();
-      });
+    // baseRev 乐观锁：云端 rev 已被其他设备/后台任务推进时服务器拒绝（409），
+    // 此处先拉取合并（两侧数据都在本地了）再重推一次——绝不整体覆盖云端
+    return cloudApi('/api/state', {
+      method: 'PUT',
+      body: JSON.stringify({ state: state, baseRev: cloud.rev || 0 })
+    }).then(function (d) {
+      cloud.rev = (d && d.rev) || (cloud.rev + 1);
+      cloud.lastSync = Date.now();
+      cloudSaveLocal();
+    }).catch(function (e) {
+      if (e && e.status === 409 && !retried) {
+        return cloudPull().then(function () { return cloudPush(true); });
+      }
+      throw e;
+    });
   }
 
   function scheduleCloudPush() {
-    if (!cloud.user || cloudBusy) return;
+    if (!cloud.user) return;
     clearTimeout(cloudPushTimer);
-    cloudPushTimer = setTimeout(function () { cloudPush().catch(function () { /* 离线时静默，下次改动再推 */ }); }, 2500);
+    cloudPushTimer = setTimeout(function () {
+      if (!cloud.user) return;
+      // 首次拉取成功前绝不推送：弱网/离线上线的设备不能拿陈旧本地数据冲掉云端
+      if (!pullOk || cloudBusy) { scheduleCloudPush(); return; }
+      cloudPush().catch(function () { pushPending = true; /* 拉取成功后自动补推 */ });
+    }, 2500);
   }
 
   /* ---------------- 实时同步（rev 轮询） ----------------
@@ -554,7 +583,7 @@
     return cloudApi('/api/auth/me').then(function (d) {
       cloud.user = d.username;
       cloudSaveLocal();
-      return cloudPull();
+      return cloudPull(true); // 启动强制全量拉取：以服务器为准，不信任本地 rev 快照
     }).then(function (r) {
       return cloudPush().then(function () { return r; }).catch(function () { return r; });
     }).catch(function (e) {
@@ -564,22 +593,32 @@
   }
   function cloudLogin(u, p) {
     return cloudApi('/api/auth/login', { method: 'POST', body: JSON.stringify({ username: u, password: p }) })
-      .then(function (d) { cloud.user = d.username; cloudSaveLocal(); return cloudPull(); })
+      .then(function (d) {
+        cloud.user = d.username;
+        cloud.rev = 0; // 换账号/重新登录必须全量拉取，旧 rev 短路会让新账号看起来「空的」
+        cloudSaveLocal();
+        return cloudPull(true);
+      })
       .then(function (r) {
-        // 登录即全量上云: 保证本机已有数据（含刚合并的结果）保存到服务器
+        // 登录即全量上云: 保证本机已有数据（含刚合并的结果）保存到服务器（baseRev 保护，冲突自动合并重推）
         return cloudPush().then(function () { return r; }).catch(function () { return r; });
       });
   }
   function cloudRegister(u, p) {
     return cloudApi('/api/auth/register', { method: 'POST', body: JSON.stringify({ username: u, password: p }) })
-      .then(function (d) { cloud.user = d.username; cloudSaveLocal(); return cloudPull(); })
+      .then(function (d) {
+        cloud.user = d.username;
+        cloud.rev = 0;
+        cloudSaveLocal();
+        return cloudPull(true);
+      })
       .then(function (r) {
         return cloudPush().then(function () { return r; }).catch(function () { return r; });
       });
   }
   function cloudLogout() {
     return cloudApi('/api/auth/logout', { method: 'POST' }).catch(function () { /* ignore */ })
-      .then(function () { cloud.user = null; cloud.lastSync = 0; cloudSaveLocal(); });
+      .then(function () { cloud.user = null; cloud.lastSync = 0; cloud.rev = 0; pullOk = false; everPulled = false; cloudSaveLocal(); });
   }
 
   /* ---------------- 查询辅助 ---------------- */

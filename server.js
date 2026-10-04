@@ -231,7 +231,7 @@ function handleMock(req, res) {
  * 直到用户主动退出。每个账号云端保存一份与浏览器 localStorage 同构的完整状态。
  */
 const DATA_DIR = path.join(ROOT, 'data');
-const SERVER_VERSION = 'v1.7.2';
+const SERVER_VERSION = 'v1.7.3';
 const ACCOUNTS_DIR = path.join(DATA_DIR, 'accounts');
 const SESSIONS_FILE = path.join(DATA_DIR, 'sessions.json');
 const STATE_MAX = 64 * 1024 * 1024; // 单份存档上限 64MB
@@ -369,6 +369,12 @@ async function handleCloudApi(req, res, pathname) {
       }
       // 重新读盘：readBody 的异步间隙里，后台任务回写可能已改过账号文件，不能覆盖在旧快照上
       const fresh = readJson(accFile, null) || acc;
+      // baseRev 乐观锁：客户端推送时带上它最后见到的 rev；期间云端若已被其他设备或
+      // 后台任务回写推进过，则拒绝落盘，客户端会先拉取合并再重推。
+      // 这是「少覆盖多」的核心防线——久未拉取成功的设备不能拿陈旧全量存档冲掉云端。
+      if (j.baseRev != null && Number(j.baseRev) !== (fresh.rev || 0)) {
+        return json(res, 409, { ok: false, conflict: true, rev: fresh.rev || 0, error: '云端已被其他设备更新，客户端将自动拉取合并后重试' });
+      }
       fresh.state = st;
       fresh.updatedAt = Date.now();
       fresh.rev = (fresh.rev || 0) + 1;
